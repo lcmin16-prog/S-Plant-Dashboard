@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -6,6 +7,49 @@ import streamlit as st
 
 DATA_FILE = "S관(3공장) 계획대시보드.csv"
 FX_FILE = "환율기준.csv"
+SPEC_NUMBER_RE = re.compile(r"[+-]\d+\.\d{2}")
+CYL_AXIS_RE = re.compile(r"([+-]\d+\.\d{2})(\d{3})")
+
+
+def format_date_series(series):
+    dates = pd.to_datetime(series, errors="coerce")
+    return dates.dt.strftime("%Y-%m-%d").fillna("")
+
+
+def parse_spec_from_code(code):
+    if not code:
+        return "", "", ""
+    text = str(code)
+    numbers = SPEC_NUMBER_RE.findall(text)
+    power = numbers[0] if numbers else ""
+    cylinder = numbers[1] if len(numbers) > 1 else ""
+    axis = ""
+    cyl_match = CYL_AXIS_RE.search(text)
+    if cyl_match:
+        axis = cyl_match.group(2)
+        if not cylinder:
+            cylinder = cyl_match.group(1)
+    return power, cylinder, axis
+
+
+def add_spec_columns(view):
+    def pick_code(row):
+        for col in ("품목코드", "Q코드", "R코드"):
+            value = row.get(col, "")
+            if pd.notna(value):
+                text = str(value).strip()
+                if text:
+                    return text
+        return ""
+
+    specs = view.apply(
+        lambda row: parse_spec_from_code(pick_code(row)),
+        axis=1,
+        result_type="expand",
+    )
+    view["파워"] = specs[0]
+    view["실린더(ADD)"] = specs[1]
+    view["축"] = specs[2]
 
 
 def load_data(path):
@@ -204,7 +248,9 @@ def main():
         }
         detail_cols = [col for col in filtered.columns if col not in hide_columns]
         search_text = st.text_input("상세 목록 검색", value="", placeholder="검색어 입력")
-        detail_df = filtered[detail_cols]
+        detail_df = filtered[detail_cols].copy()
+        if "출고예상일" in detail_df.columns:
+            detail_df["출고예상일"] = format_date_series(detail_df["출고예상일"])
         if search_text.strip():
             mask = detail_df.astype(str).apply(
                 lambda row: row.str.contains(search_text, case=False, na=False).any(),
@@ -213,32 +259,10 @@ def main():
             detail_df = detail_df[mask]
         st.dataframe(detail_df, width="stretch", height=650)
 
-    def render_focus_view(view_df, title):
-        st.subheader(title)
+    def build_focus_table(view_df, show_codes):
         stock_cols = ["사출창고", "분리창고", "검사접착", "누수규격", "완제품"]
         need_cols = ["사출필요량", "분리필요량", "수화필요량", "접착필요량", "누수/규격필요량"]
-        columns = [
-            "품명",
-            "신규분류코드",
-            "품목코드",
-            "Q코드",
-            "R코드",
-            "출고예상일",
-            "잔여수주수량",
-            "생산필요량",
-            "사출창고",
-            "분리창고",
-            "검사접착",
-            "누수규격검사",
-            "제품재고",
-            "사출필요량",
-            "분리필요량",
-            "하이드레이션/전면검사필요량",
-            "접착/멸균필요량",
-            "누수/규격검사필요량",
-        ]
-        available = [col for col in columns if col in view_df.columns]
-        view = view_df[available].copy()
+        view = view_df.copy()
         rename_map = {
             "잔여수주수량": "잔여수주량",
             "누수규격검사": "누수규격",
@@ -248,6 +272,34 @@ def main():
             "누수/규격검사필요량": "누수/규격필요량",
         }
         view = view.rename(columns=rename_map)
+        add_spec_columns(view)
+        if "출고예상일" in view.columns:
+            view["출고예상일"] = format_date_series(view["출고예상일"])
+
+        code_columns = ["품목코드", "Q코드", "R코드", "파워", "실린더(ADD)", "축"]
+        columns = ["품명", "신규분류코드"]
+        if show_codes:
+            columns.extend(["품목코드", "Q코드", "R코드"])
+        columns.extend(["파워", "실린더(ADD)", "축"])
+        columns.extend(
+            [
+                "출고예상일",
+                "잔여수주량",
+                "생산필요량",
+                "사출창고",
+                "분리창고",
+                "검사접착",
+                "누수규격",
+                "완제품",
+                "사출필요량",
+                "분리필요량",
+                "수화필요량",
+                "접착필요량",
+                "누수/규격필요량",
+            ]
+        )
+        available = [col for col in columns if col in view.columns]
+        view = view[available].copy()
         if search_text.strip():
             mask = view.astype(str).apply(
                 lambda row: row.str.contains(search_text, case=False, na=False).any(),
@@ -339,7 +391,91 @@ def main():
                 )
 
         styled = view.style.apply(border_styles, axis=None).set_table_styles(header_styles)
+        return styled
+
+    def render_focus_table(view_df, title, key_suffix):
+        st.markdown(f"**{title}**")
+        show_codes = st.checkbox(
+            "코드 컬럼 펼치기",
+            value=False,
+            key=f"show_codes_{key_suffix}",
+        )
+        table = build_focus_table(view_df, show_codes=show_codes)
+        st.dataframe(table, width="stretch", height=650)
+
+    def render_injection_summary(view_df, title):
+        st.markdown(f"**{title}**")
+        if "R코드" not in view_df.columns:
+            st.info("R코드 컬럼이 없습니다.")
+            return
+        summary = view_df.copy()
+        summary = summary[summary["R코드"].astype(str).str.strip() != ""]
+        if "품명" not in summary.columns:
+            summary["품명"] = ""
+        for col in ("생산필요량", "사출필요량", "사출창고"):
+            if col not in summary.columns:
+                summary[col] = 0
+        for col in ("생산필요량", "사출필요량", "사출창고"):
+            if col in summary.columns:
+                summary[col] = pd.to_numeric(summary[col], errors="coerce").fillna(0)
+        summary["출고예상일"] = pd.to_datetime(summary["출고예상일"], errors="coerce")
+        grouped = (
+            summary.groupby(["R코드", "품명"], dropna=True)
+            .agg(
+                {
+                    "생산필요량": "sum",
+                    "사출필요량": "sum",
+                    "사출창고": "sum",
+                    "출고예상일": "min",
+                }
+            )
+            .reset_index()
+        )
+        grouped["출고예상일"] = format_date_series(grouped["출고예상일"])
+        ordered_cols = [
+            col
+            for col in ["R코드", "품명", "생산필요량", "사출창고", "사출필요량", "출고예상일"]
+            if col in grouped.columns
+        ]
+        grouped = grouped[ordered_cols]
+        grouped = grouped.sort_values(by="출고예상일", ascending=True)
+
+        def highlight_injection(data):
+            styles = pd.DataFrame("", index=data.index, columns=data.columns)
+            for col in ("사출창고",):
+                if col in styles.columns:
+                    styles.loc[:, col] = "background-color: #EAF2FF"
+            for col in ("생산필요량", "사출필요량"):
+                if col in styles.columns:
+                    styles.loc[:, col] = "background-color: #FFF1E6"
+            return styles
+
+        styled = grouped.style.apply(highlight_injection, axis=None)
         st.dataframe(styled, width="stretch", height=650)
+
+    def render_focus_tabs(view_df, title):
+        st.subheader(title)
+        if "신규분류코드" in view_df.columns:
+            categories = sorted(
+                value
+                for value in view_df["신규분류코드"].dropna().unique().tolist()
+                if str(value).strip()
+            )
+        else:
+            categories = []
+        tab_names = ["전체"] + categories + ["사출공정"]
+        tabs = st.tabs(tab_names)
+        with tabs[0]:
+            render_focus_table(view_df, "전체", f"{title}_all")
+        for idx, category in enumerate(categories, start=1):
+            with tabs[idx]:
+                render_focus_table(
+                    view_df[view_df["신규분류코드"] == category],
+                    f"{category}",
+                    f"{title}_{category}",
+                )
+        with tabs[-1]:
+            render_injection_summary(view_df, f"{title} 사출공정 요약")
 
     has_category = "신규분류코드" in filtered.columns
     color_mask = (
@@ -348,9 +484,9 @@ def main():
         else pd.Series([False] * len(filtered), index=filtered.index)
     )
     with tab_color:
-        render_focus_view(filtered[color_mask], "Color생산계획")
+        render_focus_tabs(filtered[color_mask], "Color생산계획")
     with tab_clear:
-        render_focus_view(filtered[~color_mask], "Clear생산계획")
+        render_focus_tabs(filtered[~color_mask], "Clear생산계획")
 
 
 if __name__ == "__main__":

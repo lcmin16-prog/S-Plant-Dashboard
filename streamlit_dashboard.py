@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -90,6 +91,11 @@ def main():
     if not data_path.exists():
         st.error(f"파일을 찾을 수 없습니다: {DATA_FILE}")
         return
+    try:
+        updated_at = datetime.fromtimestamp(data_path.stat().st_mtime)
+        st.caption(f"업데이트 일자: {updated_at:%Y-%m-%d %H:%M}")
+    except OSError:
+        pass
 
     try:
         df = load_data(data_path)
@@ -360,6 +366,7 @@ def main():
             {"selector": "th.col_heading.level0", "props": [("text-align", "center")]},
             {"selector": "th.col_heading.level1", "props": [("text-align", "center")]},
         ]
+        sticky_idx = None
         for idx, (group, col) in enumerate(view.columns):
             if group == "재고현황":
                 header_styles.append(
@@ -389,6 +396,43 @@ def main():
                         "props": [("background-color", "#FFD0B0"), ("color", "#8A3B00")],
                     }
                 )
+            if col == "품명" and sticky_idx is None:
+                sticky_idx = idx
+
+        if sticky_idx is not None:
+            header_styles.append(
+                {
+                    "selector": f"th.col_heading.level0.col{sticky_idx}",
+                    "props": [
+                        ("position", "sticky"),
+                        ("left", "0px"),
+                        ("z-index", "5"),
+                        ("background-color", "#F5F5F5"),
+                    ],
+                }
+            )
+            header_styles.append(
+                {
+                    "selector": f"th.col_heading.level1.col{sticky_idx}",
+                    "props": [
+                        ("position", "sticky"),
+                        ("left", "0px"),
+                        ("z-index", "6"),
+                        ("background-color", "#F5F5F5"),
+                    ],
+                }
+            )
+            header_styles.append(
+                {
+                    "selector": f"td.col{sticky_idx}",
+                    "props": [
+                        ("position", "sticky"),
+                        ("left", "0px"),
+                        ("z-index", "4"),
+                        ("background-color", "#FFFFFF"),
+                    ],
+                }
+            )
 
         styled = view.style.apply(border_styles, axis=None).set_table_styles(header_styles)
         return styled
@@ -418,6 +462,11 @@ def main():
         for col in ("생산필요량", "사출필요량", "사출창고"):
             if col in summary.columns:
                 summary[col] = pd.to_numeric(summary[col], errors="coerce").fillna(0)
+        if "사출필요량" in summary.columns:
+            summary = summary[summary["사출필요량"] > 0]
+        if summary.empty:
+            st.info("사출필요량이 있는 품목이 없습니다.")
+            return
         summary["출고예상일"] = pd.to_datetime(summary["출고예상일"], errors="coerce")
         grouped = (
             summary.groupby(["R코드", "품명"], dropna=True)
@@ -431,13 +480,18 @@ def main():
             )
             .reset_index()
         )
+        specs = grouped["R코드"].apply(parse_spec_from_code).apply(pd.Series)
+        specs.columns = ["파워", "실린더(ADD)", "축"]
+        grouped = pd.concat([grouped, specs], axis=1)
         grouped["출고예상일"] = format_date_series(grouped["출고예상일"])
         ordered_cols = [
             col
             for col in ["R코드", "품명", "생산필요량", "사출창고", "사출필요량", "출고예상일"]
             if col in grouped.columns
         ]
-        grouped = grouped[ordered_cols]
+        grouped = grouped[
+            [*ordered_cols[:2], "파워", "실린더(ADD)", "축", *ordered_cols[2:]]
+        ]
         grouped = grouped.sort_values(by="출고예상일", ascending=True)
 
         def highlight_injection(data):

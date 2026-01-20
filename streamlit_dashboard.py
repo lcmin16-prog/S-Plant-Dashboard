@@ -388,8 +388,8 @@ def main():
     if DEBUG_DUPLICATES:
         debug_duplicate_orders(filtered_base, "filtered_base")
 
-    tab_all, tab_production, tab_c_support = st.tabs(
-        ["S관 종합현황", "생산계획", "C관접착지원"]
+    tab_all, tab_production, tab_c_support, tab_inventory = st.tabs(
+        ["S관 종합현황", "생산계획", "C관접착지원", "재고현황"]
     )
 
     with tab_all:
@@ -1141,6 +1141,106 @@ def main():
             width="stretch",
             height=calc_table_height(len(view), max_height=520),
         )
+
+    with tab_inventory:
+        st.subheader("재고현황")
+        inventory_path = Path("재고현황_요약.csv")
+        if not inventory_path.exists():
+            st.warning("재고현황_요약.csv 파일을 찾을 수 없습니다.")
+        else:
+            try:
+                inventory_df = load_data(inventory_path)
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"재고현황_요약.csv 파일을 불러오지 못했습니다: {exc}")
+                inventory_df = None
+
+            if inventory_df is None:
+                return
+
+            inventory_df = inventory_df.rename(
+                columns={col: col.strip() for col in inventory_df.columns}
+            )
+            required = {"품목코드", "사출창고", "분리창고", "검사접착", "누수규격", "완제품"}
+            missing = required - set(inventory_df.columns)
+            if missing:
+                st.warning(
+                    f"재고현황_요약.csv 필수 컬럼이 없습니다: {', '.join(sorted(missing))}"
+                )
+                return
+            for col in ["사출창고", "분리창고", "검사접착", "누수규격", "완제품"]:
+                inventory_df[col] = pd.to_numeric(
+                    inventory_df[col].astype(str).str.replace(",", "").str.strip(),
+                    errors="coerce",
+                ).fillna(0)
+            name_col = "품명" if "품명" in inventory_df.columns else None
+            pivoted = inventory_df.copy()
+
+            needs = None
+            if "품목코드" in df.columns and "생산필요량" in df.columns:
+                needs = (
+                    df.groupby("품목코드", dropna=False)["생산필요량"]
+                    .sum()
+                    .reset_index()
+                )
+                pivoted = pivoted.merge(needs, on="품목코드", how="left")
+            else:
+                pivoted["생산필요량"] = 0
+            pivoted["생산필요량"] = pd.to_numeric(
+                pivoted["생산필요량"], errors="coerce"
+            ).fillna(0)
+            pivoted["잔여수량"] = pivoted["완제품"] - pivoted["생산필요량"]
+            pivoted.loc[pivoted["잔여수량"] <= 0, "잔여수량"] = pd.NA
+
+            search_text = st.text_input(
+                "재고 검색",
+                value="",
+                placeholder="품목코드/품명 검색",
+                key="inventory_search",
+            )
+            if search_text.strip():
+                search_cols = ["품목코드"]
+                if name_col:
+                    search_cols.append("품명")
+                mask = (
+                    pivoted[search_cols]
+                    .astype(str)
+                    .apply(
+                        lambda row: row.str.contains(search_text, case=False, na=False).any(),
+                        axis=1,
+                    )
+                )
+                pivoted = pivoted[mask]
+
+            columns = [
+                "품목코드",
+                "품명",
+                "사출창고",
+                "분리창고",
+                "검사접착",
+                "누수규격",
+                "완제품",
+                "생산필요량",
+                "잔여수량",
+            ]
+            available = [col for col in columns if col in pivoted.columns]
+            view = pivoted[available].copy()
+            view = fill_object_na(view)
+
+            format_dict = {}
+            for col in view.columns:
+                if pd.api.types.is_numeric_dtype(view[col]):
+                    format_dict[col] = "{:,.0f}"
+            styled = view.style.format(format_dict, na_rep="")
+            selection = st.dataframe(
+                styled,
+                width="stretch",
+                height=calc_table_height(len(view), max_height=650),
+                on_select="rerun",
+                selection_mode="multi-row",
+                key="inventory_table",
+            )
+            if selection is not None:
+                render_selection_sum(view, selection.selection.rows, "선택 합계")
 
 
 if __name__ == "__main__":

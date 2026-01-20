@@ -1115,7 +1115,7 @@ def main():
         total_shortage = support_df["생산부족수량"].sum()
         total_actual = support_df["생산실적"].sum() if "생산실적" in support_df.columns else 0
         total_ratio = (
-            (total_shortage / total_actual) if total_actual else 0
+            (total_actual / total_shortage) if total_shortage else 0
         )
 
         kpi = st.columns(5)

@@ -388,7 +388,9 @@ def main():
     if DEBUG_DUPLICATES:
         debug_duplicate_orders(filtered_base, "filtered_base")
 
-    tab_all, tab_production = st.tabs(["S관 종합현황", "생산계획"])
+    tab_all, tab_production, tab_c_support = st.tabs(
+        ["S관 종합현황", "생산계획", "C관접착지원"]
+    )
 
     with tab_all:
         summary_df = filtered_base
@@ -1069,6 +1071,76 @@ def main():
             render_category_tabs(filtered_base[color_mask], "Color", "color")
         with clear_tab:
             render_category_tabs(filtered_base[~color_mask], "Clear", "clear")
+
+    with tab_c_support:
+        # TEMP: C관접착지원 탭 (임시 운영)
+        st.subheader("C관접착지원")
+        support_path = Path("C관접착지원_요약.csv")
+        if not support_path.exists():
+            st.warning("C관접착지원_요약.csv 파일을 찾을 수 없습니다.")
+        else:
+            try:
+                support_df = load_data(support_path)
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"C관접착지원 파일을 불러오지 못했습니다: {exc}")
+                support_df = None
+
+        if support_df is None:
+            st.info("C관접착지원 데이터를 표시할 수 없습니다.")
+        else:
+            support_df = support_df.rename(columns={col: col.strip() for col in support_df.columns})
+            support_df = support_df.dropna(how="all")
+            required_cols = {"제품명", "제품코드", "생산부족수량", "납기"}
+            missing_cols = required_cols - set(support_df.columns)
+            if missing_cols:
+                st.warning(
+                    f"C관접착지원 필수 컬럼이 없습니다: {', '.join(sorted(missing_cols))}"
+                )
+                support_df = None
+
+        if support_df is None:
+            return
+
+        for col in ["생산부족수량", "생산실적", "진도율"]:
+            if col in support_df.columns:
+                support_df[col] = pd.to_numeric(
+                    support_df[col].astype(str).str.replace(",", "").str.strip(),
+                    errors="coerce",
+                ).fillna(0)
+        if "생산부족수량" in support_df.columns:
+            support_df["생산부족수량"] = support_df["생산부족수량"].abs()
+
+        summary_name_count = support_df["제품명"].nunique()
+        summary_spec_count = support_df["제품코드"].nunique()
+        total_shortage = support_df["생산부족수량"].sum()
+        total_actual = support_df["생산실적"].sum() if "생산실적" in support_df.columns else 0
+        total_ratio = (
+            (total_shortage / total_actual) if total_actual else 0
+        )
+
+        kpi = st.columns(5)
+        kpi[0].metric("품명", f"{summary_name_count:,}")
+        kpi[1].metric("규격수", f"{summary_spec_count:,}")
+        kpi[2].metric("요청수량", f"{int(total_shortage):,}")
+        kpi[3].metric("생산실적", f"{int(total_actual):,}")
+        kpi[4].metric("진도율", f"{total_ratio * 100:.2f}%")
+
+        display_cols = ["제품코드", "제품명", "파워", "생산부족수량", "납기", "생산실적", "진도율"]
+        available_cols = [col for col in display_cols if col in support_df.columns]
+        view = support_df[available_cols].copy()
+        view = fill_object_na(view)
+        if "진도율" in view.columns:
+            view["진도율"] = view["진도율"].apply(lambda v: f"{v * 100:.2f}%")
+        format_dict = {}
+        for col in view.columns:
+            if pd.api.types.is_numeric_dtype(view[col]) and col != "진도율":
+                format_dict[col] = "{:,.0f}"
+        styled = view.style.format(format_dict, na_rep="")
+        st.dataframe(
+            styled,
+            width="stretch",
+            height=calc_table_height(len(view), max_height=520),
+        )
 
 
 if __name__ == "__main__":

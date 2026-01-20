@@ -1155,6 +1155,7 @@ def main():
                 inventory_df = None
 
             if inventory_df is None:
+                st.info("재고현황 데이터를 표시할 수 없습니다.")
                 return
 
             inventory_df = inventory_df.rename(
@@ -1226,13 +1227,14 @@ def main():
             view = pivoted[available].copy()
             view = fill_object_na(view)
 
-            format_dict = {}
-            for col in view.columns:
-                if pd.api.types.is_numeric_dtype(view[col]):
-                    format_dict[col] = "{:,.0f}"
-            styled = view.style.format(format_dict, na_rep="")
+            display = view.copy()
+            for col in display.columns:
+                if pd.api.types.is_numeric_dtype(display[col]):
+                    display[col] = display[col].apply(
+                        lambda v: "" if pd.isna(v) else f"{int(v):,}"
+                    )
             selection = st.dataframe(
-                styled,
+                display,
                 width="stretch",
                 height=calc_table_height(len(view), max_height=650),
                 on_select="rerun",

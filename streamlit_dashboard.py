@@ -243,7 +243,7 @@ def aggregate_production(view):
             agg[col] = "sum"
     if "출고예상일" in view.columns:
         agg["출고예상일"] = "min"
-    for col in ["품명", "신규분류코드", "Q코드", "R코드"]:
+    for col in ["품명", "생산품명", "신규분류코드", "Q코드", "R코드"]:
         if col in view.columns:
             agg[col] = representative_name if col == "품명" else join_unique
 
@@ -734,16 +734,24 @@ def build_excel_report(title, report_date, created_at, summary_df, table_df):
     from io import BytesIO
 
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, sheet_name="Report", index=False, startrow=4)
-        start_row = 6 + len(summary_df)
-        table_df.to_excel(writer, sheet_name="Report", index=False, startrow=start_row)
-        ws = writer.sheets["Report"]
-        ws["A1"] = title
-        ws["A2"] = f"보고 기준일: {report_date}"
-        ws["A3"] = f"작성일시: {created_at}"
+    try:
+        import openpyxl  # noqa: F401
+    except Exception:
+        return None, "openpyxl not available"
+
+    try:
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            summary_df.to_excel(writer, sheet_name="Report", index=False, startrow=4)
+            start_row = 6 + len(summary_df)
+            table_df.to_excel(writer, sheet_name="Report", index=False, startrow=start_row)
+            ws = writer.sheets["Report"]
+            ws["A1"] = title
+            ws["A2"] = f"보고 기준일: {report_date}"
+            ws["A3"] = f"작성일시: {created_at}"
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
     output.seek(0)
-    return output
+    return output, None
 
 def compute_monthly_kpis(
     actuals_df,
@@ -1362,7 +1370,7 @@ def main():
 
         stock_cols = ["사출창고", "분리창고", "검사접착", "누수규격", "완제품"]
         need_cols = ["사출필요량", "분리필요량", "수화필요량", "접착필요량", "누수/규격필요량"]
-        columns = ["품명", "신규분류코드"]
+        columns = ["품명", "생산품명", "신규분류코드"]
         if show_codes:
             columns.extend(["품목코드", "Q코드", "R코드"])
         columns.extend(
@@ -2255,6 +2263,49 @@ def main():
             kpi_cols[2].metric("실적달성율", f"{month_rate_value * 100:.2f}%")
             kpi_cols[3].metric("실근무일", f"{int(month_workdays):,}")
 
+            color_clear_note = None
+            if (
+                not actuals_raw.empty
+                and "신규분류요약" in actuals_raw.columns
+                and "생산일자" in actuals_raw.columns
+                and "공장" in actuals_raw.columns
+                and "공정코드" in actuals_raw.columns
+            ):
+                color_source = actuals_raw.copy()
+                color_source["공장"] = color_source["공장"].astype(str).str.strip()
+                color_source = color_source[color_source["공장"] == "S관(3공장)"]
+                color_source["공정코드"] = color_source["공정코드"].apply(
+                    normalize_process_code
+                )
+                color_source = color_source[color_source["공정코드"] == "[80]"]
+                color_source["생산일자"] = pd.to_datetime(
+                    color_source["생산일자"], errors="coerce"
+                )
+                color_source = color_source[
+                    (color_source["생산일자"] >= month_start)
+                    & (color_source["생산일자"] <= selected_date)
+                ]
+                actual_raw_col = "양품수량"
+                if actual_basis == "샘플제외 양품수량":
+                    sample_col = find_first_column(
+                        color_source.columns, SAMPLE_EXCL_COL_CANDIDATES
+                    )
+                    if sample_col:
+                        actual_raw_col = sample_col
+                color_source[actual_raw_col] = pd.to_numeric(
+                    color_source[actual_raw_col], errors="coerce"
+                ).fillna(0)
+                color_mask = color_source["신규분류요약"].astype(str).str.contains(
+                    "color", case=False, na=False
+                )
+                color_sum = color_source.loc[color_mask, actual_raw_col].sum()
+                clear_sum = color_source.loc[~color_mask, actual_raw_col].sum()
+                color_clear_note = f"Color {int(color_sum):,} · Clear {int(clear_sum):,}"
+
+            if color_clear_note:
+                with kpi_cols[1]:
+                    st.caption(color_clear_note)
+
             if delta_actual is not None or delta_yield is not None:
                 st.caption(
                     f"전일 대비 실적 {int(delta_actual):,}, 수율 {delta_yield * 100:.2f}p"
@@ -2795,19 +2846,31 @@ def main():
                 ],
                 columns=["항목", "값"],
             )
-            report_bytes = build_excel_report(
+            report_bytes, report_error = build_excel_report(
                 "일일 생산 현황 보고 (S관/3공장)",
                 selected_date.strftime("%Y-%m-%d"),
                 datetime.now().strftime("%Y-%m-%d %H:%M"),
                 summary_df,
                 monthly_table,
             )
-            st.download_button(
-                "일일 생산 현황 보고 Excel 다운로드",
-                data=report_bytes,
-                file_name=f"일일_생산_현황_{selected_date.strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            if report_bytes is None:
+                st.warning("Excel 파일을 생성할 수 없습니다. CSV로 다운로드합니다.")
+                csv_bytes = monthly_table.to_csv(index=False, encoding="utf-8-sig").encode(
+                    "utf-8-sig"
+                )
+                st.download_button(
+                    "일일 생산 현황 CSV 다운로드",
+                    data=csv_bytes,
+                    file_name=f"일일_생산_현황_{selected_date.strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.download_button(
+                    "일일 생산 현황 보고 Excel 다운로드",
+                    data=report_bytes,
+                    file_name=f"일일_생산_현황_{selected_date.strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
             empty_png = (
                 b"\x89PNG\r\n\x1a\n"

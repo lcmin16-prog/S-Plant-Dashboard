@@ -2373,11 +2373,14 @@ def main():
                 & (targets["월"] == selected_date.month)
                 & (targets["공정코드"].isin(PROCESS_KEYS))
             ].groupby("공정코드")["일일_생산목표량"].sum()
+            monthly_actual_col = (
+                "실적_양품" if "실적_양품" in daily_actuals.columns else actual_col
+            )
             month_actual_map = daily_actuals[
                 (daily_actuals["일자"] >= month_start)
                 & (daily_actuals["일자"] <= selected_date)
                 & (daily_actuals["공정코드"].isin(PROCESS_KEYS))
-            ].groupby("공정코드")[actual_col].sum()
+            ].groupby("공정코드")[monthly_actual_col].sum()
             prev_year_date = selected_date - pd.DateOffset(years=1)
             prev_year_start = prev_year_date.replace(day=1)
             prev_year_end = prev_year_start + pd.offsets.MonthEnd(0)
@@ -2389,7 +2392,7 @@ def main():
                 (daily_actuals["일자"] >= prev_year_start)
                 & (daily_actuals["일자"] <= prev_year_cutoff)
                 & (daily_actuals["공정코드"].isin(PROCESS_KEYS))
-            ].groupby("공정코드")[actual_col].sum()
+            ].groupby("공정코드")[monthly_actual_col].sum()
 
             prev_month_date = selected_date - pd.DateOffset(months=1)
             prev_month_start = prev_month_date.replace(day=1)
@@ -2402,7 +2405,7 @@ def main():
                 (daily_actuals["일자"] >= prev_month_start)
                 & (daily_actuals["일자"] <= prev_month_cutoff)
                 & (daily_actuals["공정코드"].isin(PROCESS_KEYS))
-            ].groupby("공정코드")[actual_col].sum()
+            ].groupby("공정코드")[monthly_actual_col].sum()
 
             monthly_rows = []
             workdays_map = daily_actuals[

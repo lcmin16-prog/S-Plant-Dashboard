@@ -5,6 +5,7 @@ from pathlib import Path
 import altair as alt
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 
 
 DATA_FILE = "깃허브_S관(3공장) 계획대시보드.csv"
@@ -12,6 +13,8 @@ FX_FILE = "월별업데이트_환율기준.csv"
 WORKDAYS_FILE = "근무일수(기준자료).csv"
 TARGET_FILE = "월별업데이트_생산목표량.csv"
 GOAL_SUMMARY_FILE = "깃허브_S관공장목표현황_요약.csv"
+FAST_MODE_KEY = "fast_mode"
+MAX_STYLE_ROWS = 1500
 SPEC_NUMBER_RE = re.compile(r"[+-]\d+\.\d{2}")
 CYL_AXIS_RE = re.compile(r"([+-]\d+\.\d{2})(\d{3})")
 DEBUG_DUPLICATES = False
@@ -176,6 +179,34 @@ def fill_object_na(frame):
     return df
 
 
+def apply_alignment(styler, frame):
+    numeric_cols = [
+        col for col in frame.columns if pd.api.types.is_numeric_dtype(frame[col])
+    ]
+    text_cols = [col for col in frame.columns if col not in numeric_cols]
+    if text_cols:
+        styler = styler.set_properties(subset=text_cols, **{"text-align": "center"})
+    if numeric_cols:
+        styler = styler.set_properties(subset=numeric_cols, **{"text-align": "right"})
+    styler = styler.set_table_styles(
+        [{"selector": "th", "props": [("text-align", "center")]}],
+        overwrite=False,
+    )
+    return styler
+
+
+def render_dataframe(styled, fallback, **kwargs):
+    fast_mode = st.session_state.get(FAST_MODE_KEY, False)
+    if fast_mode:
+        return st.dataframe(fallback, **kwargs)
+    if isinstance(fallback, pd.DataFrame) and len(fallback) > MAX_STYLE_ROWS:
+        return st.dataframe(fallback, **kwargs)
+    try:
+        return st.dataframe(styled, **kwargs)
+    except StreamlitAPIException:
+        return st.dataframe(fallback, **kwargs)
+
+
 def calc_table_height(
     row_count, row_height=32, header_height=40, min_height=140, max_height=650
 ):
@@ -196,8 +227,12 @@ def render_selection_sum(df, selected_rows, label="선택 합계"):
     sum_df.insert(0, "구분", label)
     format_dict = {col: "{:,.0f}" for col in numeric_cols}
     st.caption(label)
-    st.dataframe(
+    summary_styled = apply_alignment(
         sum_df.style.format(format_dict, na_rep=""),
+        sum_df,
+    )
+    st.dataframe(
+        summary_styled,
         width="stretch",
         height=calc_table_height(1, min_height=120, max_height=180),
     )
@@ -228,7 +263,14 @@ def aggregate_production(view):
     if key_cols:
         view = view.drop_duplicates(subset=key_cols)
 
-    stock_cols = ["사출창고", "분리창고", "검사접착", "누수규격", "완제품"]
+    stock_cols = [
+        "사출창고",
+        "분리창고",
+        "검사접착",
+        "누수규격",
+        "완제품",
+        "불용재고",
+    ]
     sum_cols = [
         "수량",
         "잔여수주량",
@@ -959,6 +1001,7 @@ def main():
         """
         <style>
         .block-separator { border-top: 1px solid #D9D9D9; margin: 10px 0; }
+        [data-testid="stDataFrame"] th { text-align: center !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -970,6 +1013,12 @@ def main():
 
     with st.sidebar:
         st.header("필터")
+        st.checkbox(
+            "빠른 로딩(서식 최소화)",
+            value=False,
+            key=FAST_MODE_KEY,
+            help="표 서식/정렬을 줄이고 로딩 속도를 높입니다.",
+        )
         selected_categories = st.multiselect(
             "신규분류코드",
             options=category_values,
@@ -1238,7 +1287,10 @@ def main():
                         styles.loc[:, col] = "color: #D0021B; font-weight: 600;"
                 return styles
 
-            monthly_styled = monthly.style.apply(highlight_need_columns, axis=None)
+            monthly_styled = apply_alignment(
+                monthly.style.apply(highlight_need_columns, axis=None),
+                monthly,
+            )
             st.dataframe(
                 monthly_styled,
                 width="stretch",
@@ -1336,12 +1388,15 @@ def main():
                 format_dict[col] = "{:,.2f}"
             else:
                 format_dict[col] = "{:,.0f}"
-        styled = (
-            detail_df.style.format(format_dict, na_rep="")
-            .apply(highlight_warning, axis=None)
+        styled = apply_alignment(
+            detail_df.style.format(format_dict, na_rep="").apply(
+                highlight_warning, axis=None
+            ),
+            detail_df,
         )
-        selection = st.dataframe(
+        selection = render_dataframe(
             styled,
+            detail_df,
             width="stretch",
             height=calc_table_height(len(detail_df)),
             on_select="rerun",
@@ -1379,7 +1434,14 @@ def main():
             key=f"show_codes_prod_{key_suffix}",
         )
 
-        stock_cols = ["사출창고", "분리창고", "검사접착", "누수규격", "완제품"]
+        stock_cols = [
+            "사출창고",
+            "분리창고",
+            "검사접착",
+            "누수규격",
+            "완제품",
+            "불용재고",
+        ]
         need_cols = ["사출필요량", "분리필요량", "수화필요량", "접착필요량", "누수/규격필요량"]
         columns = ["품명", "생산품명", "신규분류코드"]
         if show_codes:
@@ -1576,14 +1638,16 @@ def main():
                 format_dict[col] = "{:,.2f}"
             else:
                 format_dict[col] = "{:,.0f}"
-        styled = (
+        styled = apply_alignment(
             view.style.format(format_dict, na_rep="")
             .apply(border_styles, axis=None)
             .apply(highlight_warning, axis=None)
-            .set_table_styles(header_styles)
+            .set_table_styles(header_styles),
+            view,
         )
-        selection = st.dataframe(
+        selection = render_dataframe(
             styled,
+            view,
             width="stretch",
             height=calc_table_height(len(view)),
             on_select="rerun",
@@ -1687,11 +1751,15 @@ def main():
                 format_dict[col] = "{:,.2f}"
             else:
                 format_dict[col] = "{:,.0f}"
-        styled = grouped.style.format(format_dict, na_rep="").apply(
-            highlight_injection, axis=None
+        styled = apply_alignment(
+            grouped.style.format(format_dict, na_rep="").apply(
+                highlight_injection, axis=None
+            ),
+            grouped,
         )
-        selection = st.dataframe(
+        selection = render_dataframe(
             styled,
+            grouped,
             width="stretch",
             height=calc_table_height(len(grouped)),
             on_select="rerun",
@@ -1821,7 +1889,10 @@ def main():
             for col in view.columns:
                 if pd.api.types.is_numeric_dtype(view[col]) and col != "진도율":
                     format_dict[col] = "{:,.0f}"
-            styled = view.style.format(format_dict, na_rep="")
+            styled = apply_alignment(
+                view.style.format(format_dict, na_rep=""),
+                view,
+            )
             st.dataframe(
                 styled,
                 width="stretch",
@@ -1857,7 +1928,15 @@ def main():
             if inventory_df is None:
                 st.info("재고현황 데이터를 표시할 수 없습니다.")
             else:
-                for col in ["사출창고", "분리창고", "검사접착", "누수규격", "완제품"]:
+                numeric_cols = [
+                    "사출창고",
+                    "분리창고",
+                    "검사접착",
+                    "누수규격",
+                    "완제품",
+                    "불용재고",
+                ]
+                for col in [name for name in numeric_cols if name in inventory_df.columns]:
                     inventory_df[col] = pd.to_numeric(
                         inventory_df[col].astype(str).str.replace(",", "").str.strip(),
                         errors="coerce",
@@ -1912,6 +1991,7 @@ def main():
                     "검사접착",
                     "누수규격",
                     "완제품",
+                    "불용재고",
                     "생산필요량",
                     "잔여수량",
                 ]
@@ -1919,14 +1999,17 @@ def main():
                 view = pivoted[available].copy()
                 view = fill_object_na(view)
 
-                display = view.copy()
-                for col in display.columns:
-                    if pd.api.types.is_numeric_dtype(display[col]):
-                        display[col] = display[col].apply(
-                            lambda v: "" if pd.isna(v) else f"{int(v):,}"
-                        )
-                selection = st.dataframe(
-                    display,
+                format_dict = {}
+                for col in view.columns:
+                    if pd.api.types.is_numeric_dtype(view[col]):
+                        format_dict[col] = "{:,.0f}"
+                styled = apply_alignment(
+                    view.style.format(format_dict, na_rep=""),
+                    view,
+                )
+                selection = render_dataframe(
+                    styled,
+                    view,
                     width="stretch",
                     height=calc_table_height(len(view), max_height=650),
                     on_select="rerun",
@@ -2464,25 +2547,59 @@ def main():
             monthly_table = pd.DataFrame(monthly_rows)
             monthly_table.columns = pd.MultiIndex.from_tuples(monthly_table.columns)
             st.markdown("#### 공정별 목표/실적")
-            st.dataframe(
+
+            def format_achievement(value):
+                if pd.isna(value):
+                    return ""
+                if value >= 1:
+                    icon = "✅"
+                elif value >= 0.9:
+                    icon = "⚠️"
+                else:
+                    icon = "❌"
+                return f"{icon} {value * 100:.2f}%"
+
+            def highlight_delta_columns(data):
+                styles = pd.DataFrame("", index=data.index, columns=data.columns)
+                delta_columns = [
+                    ("전년동월", "증감(월)"),
+                    ("전월", "증감(월)"),
+                ]
+                for col in delta_columns:
+                    if col not in data.columns:
+                        continue
+                    for idx, value in data[col].items():
+                        if pd.isna(value):
+                            continue
+                        if value < 0:
+                            styles.loc[idx, col] = "color: #D0021B; font-weight: 700;"
+                        elif value > 0:
+                            styles.loc[idx, col] = "color: #2B6CB0; font-weight: 700;"
+                return styles
+
+            monthly_styled = apply_alignment(
                 monthly_table.style.format(
                     {
                         ("목표", "일"): "{:,.0f}",
                         ("목표", "월"): "{:,.0f}",
                         ("실적", "일"): "{:,.0f}",
                         ("실적", "월"): "{:,.0f}",
-                        ("달성율", "(실적/목표)"): "{:.2%}",
                         ("전년동월", "일"): "{:,.0f}",
                         ("전년동월", "월"): "{:,.0f}",
                         ("전년동월", "증감(월)"): "{:,.0f}",
                         ("전월", "일"): "{:,.0f}",
                         ("전월", "월"): "{:,.0f}",
                         ("전월", "증감(월)"): "{:,.0f}",
+                        ("달성율", "(실적/목표)"): format_achievement,
                     },
                     na_rep="",
-                ),
+                ).apply(highlight_delta_columns, axis=None),
+                monthly_table,
+            )
+            st.dataframe(
+                monthly_styled,
                 width="stretch",
-                height=calc_table_height(len(monthly_table), max_height=240),
+                height=calc_table_height(len(monthly_table), max_height=420),
             )
 
             yield_process_map = {
@@ -2497,7 +2614,12 @@ def main():
                 & (daily_actuals["일자"] <= selected_date)
                 & (daily_actuals["공정코드"].isin(yield_process_map.keys()))
             ].copy()
-            prev_yield_source = daily_actuals[
+            prev_year_yield_source = daily_actuals[
+                (daily_actuals["일자"] >= prev_year_start)
+                & (daily_actuals["일자"] <= prev_year_cutoff)
+                & (daily_actuals["공정코드"].isin(yield_process_map.keys()))
+            ].copy()
+            prev_month_yield_source = daily_actuals[
                 (daily_actuals["일자"] >= prev_month_start)
                 & (daily_actuals["일자"] <= prev_month_cutoff)
                 & (daily_actuals["공정코드"].isin(yield_process_map.keys()))
@@ -2513,74 +2635,138 @@ def main():
                 / yield_grouped["생산수량"].replace(0, pd.NA)
             )
 
-            prev_yield_grouped = (
-                prev_yield_source.groupby("공정코드", dropna=False)
+            prev_year_yield_grouped = (
+                prev_year_yield_source.groupby("공정코드", dropna=False)
                 .agg(실적=(actual_col, "sum"), 생산수량=("생산수량", "sum"))
                 .reset_index()
             )
-            prev_yield_grouped["수율"] = (
-                prev_yield_grouped["실적"]
-                / prev_yield_grouped["생산수량"].replace(0, pd.NA)
+            prev_year_yield_grouped["수율"] = (
+                prev_year_yield_grouped["실적"]
+                / prev_year_yield_grouped["생산수량"].replace(0, pd.NA)
             )
 
+            prev_month_yield_grouped = (
+                prev_month_yield_source.groupby("공정코드", dropna=False)
+                .agg(실적=(actual_col, "sum"), 생산수량=("생산수량", "sum"))
+                .reset_index()
+            )
+            prev_month_yield_grouped["수율"] = (
+                prev_month_yield_grouped["실적"]
+                / prev_month_yield_grouped["생산수량"].replace(0, pd.NA)
+            )
+
+            current_label = f"{selected_date.month}월 수율"
             yield_rows = []
             for code, label in yield_process_map.items():
                 current_row = yield_grouped[yield_grouped["공정코드"] == code]
-                prev_row = prev_yield_grouped[prev_yield_grouped["공정코드"] == code]
-                current_rate = current_row["수율"].iloc[0] if not current_row.empty else pd.NA
-                prev_rate = prev_row["수율"].iloc[0] if not prev_row.empty else pd.NA
-                if pd.notna(current_rate) and pd.notna(prev_rate) and prev_rate != 0:
-                    diff = current_rate - prev_rate
-                    arrow = "▲" if diff > 0 else "▼"
-                    diff_text = f"{arrow} {abs(diff) * 100:.2f}%"
-                else:
-                    diff = pd.NA
-                    diff_text = "-"
+                prev_year_row = prev_year_yield_grouped[
+                    prev_year_yield_grouped["공정코드"] == code
+                ]
+                prev_month_row = prev_month_yield_grouped[
+                    prev_month_yield_grouped["공정코드"] == code
+                ]
+                current_rate = (
+                    current_row["수율"].iloc[0] if not current_row.empty else pd.NA
+                )
+                prev_year_rate = (
+                    prev_year_row["수율"].iloc[0] if not prev_year_row.empty else pd.NA
+                )
+                prev_month_rate = (
+                    prev_month_row["수율"].iloc[0] if not prev_month_row.empty else pd.NA
+                )
+                diff_year = (
+                    current_rate - prev_year_rate
+                    if pd.notna(current_rate) and pd.notna(prev_year_rate)
+                    else pd.NA
+                )
+                diff_month = (
+                    current_rate - prev_month_rate
+                    if pd.notna(current_rate) and pd.notna(prev_month_rate)
+                    else pd.NA
+                )
                 yield_rows.append(
                     {
                         "공정": label,
-                        "전년동월 수율": prev_rate,
-                        f"{selected_date.month}월 수율": current_rate,
-                        "증감": diff_text,
-                        "증감값": diff,
+                        "전년동월 수율": prev_year_rate,
+                        "전월 수율": prev_month_rate,
+                        current_label: current_rate,
+                        "증감(전년대비)": diff_year,
+                        "증감(전월대비)": diff_month,
                     }
                 )
-            yields = [row[f"{selected_date.month}월 수율"] for row in yield_rows if pd.notna(row[f"{selected_date.month}월 수율"])]
+            current_vals = [
+                row[current_label] for row in yield_rows if pd.notna(row[current_label])
+            ]
+            prev_year_vals = [
+                row["전년동월 수율"]
+                for row in yield_rows
+                if pd.notna(row["전년동월 수율"])
+            ]
+            prev_month_vals = [
+                row["전월 수율"] for row in yield_rows if pd.notna(row["전월 수율"])
+            ]
             total_yield = 1
-            for val in yields:
+            for val in current_vals:
                 total_yield *= val
+            total_prev_year = 1
+            for val in prev_year_vals:
+                total_prev_year *= val
+            total_prev_month = 1
+            for val in prev_month_vals:
+                total_prev_month *= val
             yield_rows.append(
                 {
                     "공정": "종합수율",
-                    "전년동월 수율": pd.NA,
-                    f"{selected_date.month}월 수율": total_yield if yields else pd.NA,
-                    "증감": "-",
-                    "증감값": pd.NA,
+                    "전년동월 수율": total_prev_year if prev_year_vals else pd.NA,
+                    "전월 수율": total_prev_month if prev_month_vals else pd.NA,
+                    current_label: total_yield if current_vals else pd.NA,
+                    "증감(전년대비)": (
+                        total_yield - total_prev_year
+                        if current_vals and prev_year_vals
+                        else pd.NA
+                    ),
+                    "증감(전월대비)": (
+                        total_yield - total_prev_month
+                        if current_vals and prev_month_vals
+                        else pd.NA
+                    ),
                 }
             )
             yield_table = pd.DataFrame(yield_rows)
 
             def highlight_yield(data):
                 styles = pd.DataFrame("", index=data.index, columns=data.columns)
-                if "증감값" in data.columns:
-                    for idx, value in data["증감값"].items():
+                for col in ["증감(전년대비)", "증감(전월대비)"]:
+                    if col not in data.columns:
+                        continue
+                    for idx, value in data[col].items():
                         if pd.isna(value):
                             continue
-                        if value > 0:
-                            styles.loc[idx, "증감"] = "color: #D0021B; font-weight: 700;"
-                        elif value < 0:
-                            styles.loc[idx, "증감"] = "color: #2B6CB0; font-weight: 700;"
+                        if value < 0:
+                            styles.loc[idx, col] = "color: #D0021B; font-weight: 700;"
+                        elif value > 0:
+                            styles.loc[idx, col] = "color: #2B6CB0; font-weight: 700;"
                 return styles
 
-            display_yield = yield_table.drop(columns=["증감값"])
+            display_yield = yield_table
             st.markdown("#### 공정별 수율")
-            st.dataframe(
+            yield_styled = apply_alignment(
                 display_yield.style.format(
-                    {"전년동월 수율": "{:.2%}", f"{selected_date.month}월 수율": "{:.2%}"},
+                    {
+                        "전년동월 수율": "{:.2%}",
+                        "전월 수율": "{:.2%}",
+                        current_label: "{:.2%}",
+                        "증감(전년대비)": "{:+.2%}",
+                        "증감(전월대비)": "{:+.2%}",
+                    },
                     na_rep="",
                 ).apply(highlight_yield, axis=None),
+                display_yield,
+            )
+            st.dataframe(
+                yield_styled,
                 width="stretch",
-                height=calc_table_height(len(display_yield), max_height=240),
+                height=calc_table_height(len(display_yield), max_height=420),
             )
 
             daily_month = daily_actuals[
@@ -2607,18 +2793,35 @@ def main():
                 )
 
             st.markdown("#### 금월 일별 실적")
-            st.dataframe(
+
+            def highlight_daily_diff(data):
+                styles = pd.DataFrame("", index=data.index, columns=data.columns)
+                if "차이" in data.columns:
+                    for idx, value in data["차이"].items():
+                        if pd.isna(value):
+                            continue
+                        if value < 0:
+                            styles.loc[idx, "차이"] = "color: #D0021B; font-weight: 700;"
+                        elif value > 0:
+                            styles.loc[idx, "차이"] = "color: #2B6CB0; font-weight: 700;"
+                return styles
+
+            daily_styled = apply_alignment(
                 daily_sum.style.format(
                     {
                         "목표(일)": "{:,.0f}",
                         "실적": "{:,.0f}",
                         "차이": "{:,.0f}",
-                        "달성율": "{:.2%}",
+                        "달성율": format_achievement,
                     },
                     na_rep="",
-                ),
+                ).apply(highlight_daily_diff, axis=None),
+                daily_sum,
+            )
+            st.dataframe(
+                daily_styled,
                 width="stretch",
-                height=calc_table_height(len(daily_sum), max_height=320),
+                height=calc_table_height(len(daily_sum), max_height=520),
             )
 
             if view_mode == "Daily":
@@ -2859,8 +3062,16 @@ def main():
                     ]
                     detail_view = anomaly_detail[detail_cols].copy()
                     detail_view["일자"] = detail_view["일자"].dt.strftime("%Y-%m-%d")
-                    st.dataframe(
+                    detail_format = {}
+                    for col in detail_view.columns:
+                        if pd.api.types.is_numeric_dtype(detail_view[col]):
+                            detail_format[col] = "{:,.2f}" if "수율" in col else "{:,.0f}"
+                    detail_styled = apply_alignment(
+                        detail_view.style.format(detail_format, na_rep=""),
                         detail_view,
+                    )
+                    st.dataframe(
+                        detail_styled,
                         width="stretch",
                         height=calc_table_height(len(detail_view), max_height=320),
                     )
@@ -2889,8 +3100,18 @@ def main():
                     )
                     validation["차이"] = validation["생산수량"] - validation["총출력"]
                     validation["공정"] = validation["공정코드"].apply(process_display)
+                    validation_view = validation[["공정", "생산수량", "총출력", "차이"]]
+                    validation_format = {
+                        "생산수량": "{:,.0f}",
+                        "총출력": "{:,.0f}",
+                        "차이": "{:,.0f}",
+                    }
+                    validation_styled = apply_alignment(
+                        validation_view.style.format(validation_format, na_rep=""),
+                        validation_view,
+                    )
                     st.dataframe(
-                        validation[["공정", "생산수량", "총출력", "차이"]],
+                        validation_styled,
                         width="stretch",
                         height=calc_table_height(len(validation), max_height=280),
                     )

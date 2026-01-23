@@ -8,9 +8,9 @@ import streamlit as st
 
 
 DATA_FILE = "깃허브_S관(3공장) 계획대시보드.csv"
-FX_FILE = "환율기준.csv"
+FX_FILE = "월별업데이트_환율기준.csv"
 WORKDAYS_FILE = "근무일수(기준자료).csv"
-TARGET_FILE = "생산목표량.csv"
+TARGET_FILE = "월별업데이트_생산목표량.csv"
 GOAL_SUMMARY_FILE = "깃허브_S관공장목표현황_요약.csv"
 SPEC_NUMBER_RE = re.compile(r"[+-]\d+\.\d{2}")
 CYL_AXIS_RE = re.compile(r"([+-]\d+\.\d{2})(\d{3})")
@@ -57,6 +57,17 @@ def find_first_column(columns, candidates):
         if name in columns:
             return name
     return None
+
+
+def normalize_numeric(series):
+    return (
+        series.astype(str)
+        .str.replace(",", "", regex=False)
+        .str.strip()
+        .replace({"": "0", "nan": "0", "None": "0"})
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0)
+    )
 
 
 def normalize_process_code(value):
@@ -288,7 +299,7 @@ def load_fx(path):
 def load_actuals():
     files = [
         path
-        for path in Path(".").glob("생산실적현황*.csv")
+        for path in Path(".").glob("일별업데이트_생산실적현황*.csv")
         if "2025" in path.name or "2026" in path.name
     ]
     frames = []
@@ -423,16 +434,16 @@ def preprocess_actuals(actuals):
     df = df[df["생산일자"].dt.year.isin([2025, 2026])]
     df["연"] = df["생산일자"].dt.year
     df["월"] = df["생산일자"].dt.month
-    df["양품수량"] = pd.to_numeric(df["양품수량"], errors="coerce").fillna(0)
+    df["양품수량"] = normalize_numeric(df["양품수량"])
     sample_excl_col = find_first_column(df.columns, SAMPLE_EXCL_COL_CANDIDATES)
     if sample_excl_col:
-        df[sample_excl_col] = pd.to_numeric(df[sample_excl_col], errors="coerce").fillna(0)
+        df[sample_excl_col] = normalize_numeric(df[sample_excl_col])
     else:
         df["샘플제외양품수량"] = 0
         sample_excl_col = "샘플제외양품수량"
     for col in ["생산수량", "불량수량", "샘플수량"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            df[col] = normalize_numeric(df[col])
         else:
             df[col] = 0
     df["실제근무"] = (df["양품수량"] > 0) | (df["생산수량"] > 0)
@@ -551,16 +562,16 @@ def preprocess_actuals_daily(actuals):
     df["일자"] = df["생산일자"].dt.normalize()
     df["연"] = df["생산일자"].dt.year
     df["월"] = df["생산일자"].dt.month
-    df["양품수량"] = pd.to_numeric(df["양품수량"], errors="coerce").fillna(0)
+    df["양품수량"] = normalize_numeric(df["양품수량"])
     sample_excl_col = find_first_column(df.columns, SAMPLE_EXCL_COL_CANDIDATES)
     if sample_excl_col:
-        df[sample_excl_col] = pd.to_numeric(df[sample_excl_col], errors="coerce").fillna(0)
+        df[sample_excl_col] = normalize_numeric(df[sample_excl_col])
     else:
         df["샘플제외양품수량"] = 0
         sample_excl_col = "샘플제외양품수량"
     for col in ["생산수량", "불량수량", "샘플수량"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            df[col] = normalize_numeric(df[col])
         else:
             df[col] = 0
     df["실제근무"] = (df["양품수량"] > 0) | (df["생산수량"] > 0)
@@ -2292,9 +2303,9 @@ def main():
                     )
                     if sample_col:
                         actual_raw_col = sample_col
-                color_source[actual_raw_col] = pd.to_numeric(
-                    color_source[actual_raw_col], errors="coerce"
-                ).fillna(0)
+                color_source[actual_raw_col] = normalize_numeric(
+                    color_source[actual_raw_col]
+                )
                 color_mask = color_source["신규분류요약"].astype(str).str.contains(
                     "color", case=False, na=False
                 )
@@ -2368,7 +2379,20 @@ def main():
                 & (daily_actuals["공정코드"].isin(PROCESS_KEYS))
             ].groupby("공정코드")[actual_col].sum()
             prev_year_date = selected_date - pd.DateOffset(years=1)
-            prev_month_start = prev_year_date.replace(day=1)
+            prev_year_start = prev_year_date.replace(day=1)
+            prev_year_end = prev_year_start + pd.offsets.MonthEnd(0)
+            prev_year_cutoff = min(
+                prev_year_end,
+                prev_year_start + pd.Timedelta(days=selected_date.day - 1),
+            )
+            prev_year_actual_map = daily_actuals[
+                (daily_actuals["일자"] >= prev_year_start)
+                & (daily_actuals["일자"] <= prev_year_cutoff)
+                & (daily_actuals["공정코드"].isin(PROCESS_KEYS))
+            ].groupby("공정코드")[actual_col].sum()
+
+            prev_month_date = selected_date - pd.DateOffset(months=1)
+            prev_month_start = prev_month_date.replace(day=1)
             prev_month_end = prev_month_start + pd.offsets.MonthEnd(0)
             prev_month_cutoff = min(
                 prev_month_end,
@@ -2387,37 +2411,70 @@ def main():
                 & (daily_actuals["공정코드"].isin(PROCESS_KEYS))
                 & (daily_actuals["실제근무"])
             ].groupby("공정코드")["일자"].nunique()
+            prev_year_workdays_map = daily_actuals[
+                (daily_actuals["일자"] >= prev_year_start)
+                & (daily_actuals["일자"] <= prev_year_cutoff)
+                & (daily_actuals["공정코드"].isin(PROCESS_KEYS))
+                & (daily_actuals["실제근무"])
+            ].groupby("공정코드")["일자"].nunique()
+            prev_month_workdays_map = daily_actuals[
+                (daily_actuals["일자"] >= prev_month_start)
+                & (daily_actuals["일자"] <= prev_month_cutoff)
+                & (daily_actuals["공정코드"].isin(PROCESS_KEYS))
+                & (daily_actuals["실제근무"])
+            ].groupby("공정코드")["일자"].nunique()
             for code in PROCESS_KEYS:
                 daily_target = target_map.get(code, 0)
-                month_target = daily_target * month_workdays_value
-                month_actual = month_actual_map.get(code, 0)
-                prev_actual = prev_month_actual_map.get(code, 0)
-                rate = month_actual / month_target if month_target else pd.NA
                 workdays_count = workdays_map.get(code, 0)
+                month_target = daily_target * workdays_count
+                month_actual = month_actual_map.get(code, 0)
+                prev_year_actual = prev_year_actual_map.get(code, 0)
+                prev_month_actual = prev_month_actual_map.get(code, 0)
+                rate = month_actual / month_target if month_target else pd.NA
+                avg_target = month_target / workdays_count if workdays_count else pd.NA
                 avg_actual = month_actual / workdays_count if workdays_count else pd.NA
+                prev_year_days = prev_year_workdays_map.get(code, 0)
+                prev_month_days = prev_month_workdays_map.get(code, 0)
+                prev_year_avg = (
+                    prev_year_actual / prev_year_days if prev_year_days else pd.NA
+                )
+                prev_month_avg = (
+                    prev_month_actual / prev_month_days if prev_month_days else pd.NA
+                )
                 monthly_rows.append(
                     {
-                        "공정": process_display(code),
-                        "목표(월)": month_target,
-                        "목표(일)": daily_target,
-                        "실적(월)": month_actual,
-                        "실적(일평균)": avg_actual,
-                        "실적(전년동월)": prev_actual,
-                        "달성율(실적/목표)": rate,
+                        ("공정", ""): process_display(code),
+                        ("목표", "일"): avg_target,
+                        ("목표", "월"): month_target,
+                        ("실적", "일"): avg_actual,
+                        ("실적", "월"): month_actual,
+                        ("달성율", "(실적/목표)"): rate,
+                        ("전년동월", "일"): prev_year_avg,
+                        ("전년동월", "월"): prev_year_actual,
+                        ("전년동월", "증감(월)"): month_actual - prev_year_actual,
+                        ("전월", "일"): prev_month_avg,
+                        ("전월", "월"): prev_month_actual,
+                        ("전월", "증감(월)"): month_actual - prev_month_actual,
                     }
                 )
 
             monthly_table = pd.DataFrame(monthly_rows)
+            monthly_table.columns = pd.MultiIndex.from_tuples(monthly_table.columns)
             st.markdown("#### 공정별 목표/실적")
             st.dataframe(
                 monthly_table.style.format(
                     {
-                        "목표(월)": "{:,.0f}",
-                        "목표(일)": "{:,.0f}",
-                        "실적(월)": "{:,.0f}",
-                        "실적(일평균)": "{:,.0f}",
-                        "실적(전년동월)": "{:,.0f}",
-                        "달성율(실적/목표)": "{:.2%}",
+                        ("목표", "일"): "{:,.0f}",
+                        ("목표", "월"): "{:,.0f}",
+                        ("실적", "일"): "{:,.0f}",
+                        ("실적", "월"): "{:,.0f}",
+                        ("달성율", "(실적/목표)"): "{:.2%}",
+                        ("전년동월", "일"): "{:,.0f}",
+                        ("전년동월", "월"): "{:,.0f}",
+                        ("전년동월", "증감(월)"): "{:,.0f}",
+                        ("전월", "일"): "{:,.0f}",
+                        ("전월", "월"): "{:,.0f}",
+                        ("전월", "증감(월)"): "{:,.0f}",
                     },
                     na_rep="",
                 ),

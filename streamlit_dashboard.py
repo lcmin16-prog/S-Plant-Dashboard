@@ -1,4 +1,5 @@
 ﻿import re
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -1015,7 +1016,7 @@ def main():
         st.header("필터")
         st.checkbox(
             "빠른 로딩(서식 최소화)",
-            value=False,
+            value=True,
             key=FAST_MODE_KEY,
             help="표 서식/정렬을 줄이고 로딩 속도를 높입니다.",
         )
@@ -1092,7 +1093,13 @@ def main():
     if DEBUG_DUPLICATES:
         debug_duplicate_orders(filtered_base, "filtered_base")
 
-    tab_all, tab_production, tab_c_support, tab_inventory, tab_goal = st.tabs(
+    (
+        tab_all,
+        tab_production,
+        tab_c_support,
+        tab_inventory,
+        tab_goal,
+    ) = st.tabs(
         ["S관 종합현황", "생산계획", "C관접착지원", "재고현황", "S관 공장목표현황"]
     )
 

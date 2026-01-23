@@ -1016,7 +1016,7 @@ def main():
         st.header("필터")
         st.checkbox(
             "빠른 로딩(서식 최소화)",
-            value=True,
+            value=False,
             key=FAST_MODE_KEY,
             help="표 서식/정렬을 줄이고 로딩 속도를 높입니다.",
         )

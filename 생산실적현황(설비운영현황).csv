@@ -1,0 +1,34 @@
+﻿공장,공정,가동대수(합계),분류,가동대수(분류),생산상위품목
+A관(1공장),[10] 사출조립,9,1-Day_Sph,3,1-day_58_Kontaktni-HA
+A관(1공장),[10] 사출조립,9,FRP_Sph,3,(UV_NEW)CS30_8.60
+A관(1공장),[10] 사출조립,9,FRP_Toric,1,T38_(UV포함)
+A관(1공장),[10] 사출조립,9,Si_1-Day_Sph,1,O2O2 Spherical(DK70)_K2-SMD
+A관(1공장),[10] 사출조립,9,Si_1-Day_Toric,1,O2O2 D_UV_Toric_SMD
+A관(1공장),[20] 분리,6,1-Day_Sph,1,1-Day_Metha
+A관(1공장),[20] 분리,6,FRP_Sph,4,(NEW)S43-HD-Dry-14.4
+A관(1공장),[20] 분리,6,FRP_Toric,1,T55_소사각
+A관(1공장),[55] 접착/멸균,12,FRP_Color_Sph,2,Rose_color_원형
+A관(1공장),[55] 접착/멸균,12,FRP_Sph,5,(UV)CS30_원형_8.60
+A관(1공장),[55] 접착/멸균,12,FRP_Toric,1,T38_금캡
+A관(1공장),[55] 접착/멸균,12,Si_FRP_Color_Sph,1,O2O2 M_Natural Chocolat EX_(중)
+A관(1공장),[55] 접착/멸균,12,Si_FRP_Sph,3,O2O2 M_Spherical(DK70)_K2-SMD_(소)
+C관(2공장),[10] 사출조립,33,1-Day_Color_Sph,29,PIA D_Gray Bunny_55% UV 14.2
+C관(2공장),[10] 사출조립,33,1-Day_Color_Toric,2,PIA D Toric_Dollish Brown_55% UV
+C관(2공장),[10] 사출조립,33,FRP_Color_Sph,2,Cherish Brown_PIA_M_(중)_14.2
+C관(2공장),[20] 분리,25,1-Day_Color_Sph,20,PIA D_Cherish Brown_55% UV 14.2
+C관(2공장),[20] 분리,25,1-Day_Color_Toric,1,PIA D Toric CP-1.25_Dollish Brown_55% UV
+C관(2공장),[20] 분리,25,1-Day_Sph,3,1-day_58_Kontaktni-HA
+C관(2공장),[20] 분리,25,FRP_Color_Sph,1,Gray Bunny_PIA_M_(중)_14.2
+C관(2공장),[55] 접착/멸균,17,1-Day_Color_Sph,15,1-Day_iris_SoulBrown
+C관(2공장),[55] 접착/멸균,17,1-Day_Color_Toric,1,PIA_Opal CP-0.75 Toric_UV
+C관(2공장),[55] 접착/멸균,17,1-Day_Sph,1,1-DAY58_Micure
+S관(3공장),[10] 사출조립,7,1-Day_Color_Sph,1,DYE D_LAVA
+S관(3공장),[10] 사출조립,7,Si_1-Day_Color_Sph,3,Clalen O2O2 D_Lake Gray_45%
+S관(3공장),[10] 사출조립,7,Si_1-Day_M/F,1,O2O2_Multifocal_K2_SMDH_OPHTALMIC
+S관(3공장),[10] 사출조립,7,Si_1-Day_Sph,2,O2O2 Spherical_K2-SMDH_OPHTALMIC
+S관(3공장),[20] 분리,13,1-Day_Color_Sph,2,DYE D_LAVA
+S관(3공장),[20] 분리,13,Si_1-Day_Color_Sph,4,Clalen O2O2 D_Lake Gray_45%
+S관(3공장),[20] 분리,13,Si_1-Day_Sph,7,O2O2 Spherical_K2-SMDH_OPHTALMIC
+S관(3공장),[55] 접착/멸균,7,1-Day_Sph,3,1-DAY(OPTIC CENTER)
+S관(3공장),[55] 접착/멸균,7,Si_1-Day_Color_Sph,3,Clalen O2O2 D_Lake Gray_45%
+S관(3공장),[55] 접착/멸균,7,Si_1-Day_Sph,1,O2O2 Spherical_K2-SMDH_WHITE_OPHTALMIC

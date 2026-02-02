@@ -81,9 +81,25 @@ def normalize_process_code(value):
     for key in PROCESS_KEYS:
         if key in text:
             return key
+    if "[11]" in text:
+        return "[10]"
+    if "[21]" in text:
+        return "[20]"
+    if "[46]" in text:
+        return "[45]"
+    if "[81]" in text:
+        return "[80]"
     digits = re.findall(r"\d+", text)
     if digits:
         code = digits[0]
+        if code == "11":
+            code = "10"
+        elif code == "21":
+            code = "20"
+        elif code == "46":
+            code = "45"
+        elif code == "81":
+            code = "80"
         if code in {"10", "20", "45", "80"}:
             return f"[{code}]"
     return text
@@ -1096,11 +1112,19 @@ def main():
     (
         tab_all,
         tab_production,
-        tab_c_support,
         tab_inventory,
         tab_goal,
+        tab_micellia,
+        tab_tiktok,
     ) = st.tabs(
-        ["S관 종합현황", "생산계획", "C관접착지원", "재고현황", "S관 공장목표현황"]
+        [
+            "S관 종합현황",
+            "생산계획",
+            "재고현황",
+            "S관 공장목표현황",
+            "미셀리아 진행현황",
+            "틱톡글로벌 진행현황",
+        ]
     )
 
     with tab_all:
@@ -1141,16 +1165,20 @@ def main():
             month_df["월"] = month_df[month_source].dt.to_period("M").astype(str)
             if "수출국가" in month_df.columns:
                 month_df["수출/국내"] = month_df["수출국가"].astype(str).str.strip()
-                def map_scope(value):
+
+                def map_scope(value, initial):
                     if value == "국내":
-                        return "국내"
-                    if value.startswith("예외:"):
-                        mapped = value.replace("예외:", "", 1).strip()
-                        return mapped if mapped else "예외"
-                    if value == "예외":
-                        return "예외"
+                        return initial if initial else "국내"
+                    if value.startswith("예외:") or value == "예외":
+                        return initial if initial else "예외"
                     return "수출"
-                month_df["수출/국내"] = month_df["수출/국내"].apply(map_scope)
+
+                month_df["수출/국내"] = month_df.apply(
+                    lambda row: map_scope(
+                        row["수출/국내"], str(row.get("이니셜", "")).strip()
+                    ),
+                    axis=1,
+                )
             else:
                 month_df["수출/국내"] = "수출"
             month_df["수량"] = pd.to_numeric(
@@ -1825,87 +1853,6 @@ def main():
         with clear_tab:
             render_category_tabs(filtered_base[~color_mask], "Clear", "clear")
 
-    with tab_c_support:
-        # TEMP: C관접착지원 탭 (임시 운영)
-        st.subheader("C관접착지원")
-        support_path = Path("깃허브_C관접착지원_요약.csv")
-        if not support_path.exists():
-            st.warning("깃허브_C관접착지원_요약.csv 파일을 찾을 수 없습니다.")
-        else:
-            try:
-                support_df = load_data(support_path)
-            except Exception as exc:  # noqa: BLE001
-                st.warning(f"깃허브_C관접착지원 파일을 불러오지 못했습니다: {exc}")
-                support_df = None
-
-        if support_df is None:
-            st.info("C관접착지원 데이터를 표시할 수 없습니다.")
-        else:
-            support_df = support_df.rename(columns={col: col.strip() for col in support_df.columns})
-            support_df = support_df.dropna(how="all")
-            required_cols = {"제품명", "제품코드", "생산부족수량", "납기"}
-            missing_cols = required_cols - set(support_df.columns)
-            if missing_cols:
-                st.warning(
-                    f"깃허브_C관접착지원 필수 컬럼이 없습니다: {', '.join(sorted(missing_cols))}"
-                )
-                support_df = None
-
-        if support_df is None:
-            st.info("C관접착지원 데이터를 표시할 수 없습니다.")
-        else:
-            for col in ["생산부족수량", "생산실적", "진도율"]:
-                if col in support_df.columns:
-                    support_df[col] = pd.to_numeric(
-                        support_df[col].astype(str).str.replace(",", "").str.strip(),
-                        errors="coerce",
-                    ).fillna(0)
-            if "생산부족수량" in support_df.columns:
-                support_df["생산부족수량"] = support_df["생산부족수량"].abs()
-
-            summary_name_count = support_df["제품명"].nunique()
-            summary_spec_count = support_df["제품코드"].nunique()
-            total_shortage = support_df["생산부족수량"].sum()
-            total_actual = (
-                support_df["생산실적"].sum() if "생산실적" in support_df.columns else 0
-            )
-            total_ratio = (total_actual / total_shortage) if total_shortage else 0
-
-            kpi = st.columns(5)
-            kpi[0].metric("품명", f"{summary_name_count:,}")
-            kpi[1].metric("규격수", f"{summary_spec_count:,}")
-            kpi[2].metric("요청수량", f"{int(total_shortage):,}")
-            kpi[3].metric("생산실적", f"{int(total_actual):,}")
-            kpi[4].metric("진도율", f"{total_ratio * 100:.2f}%")
-
-            display_cols = [
-                "제품코드",
-                "제품명",
-                "파워",
-                "생산부족수량",
-                "납기",
-                "생산실적",
-                "진도율",
-            ]
-            available_cols = [col for col in display_cols if col in support_df.columns]
-            view = support_df[available_cols].copy()
-            view = fill_object_na(view)
-            if "진도율" in view.columns:
-                view["진도율"] = view["진도율"].apply(lambda v: f"{v * 100:.2f}%")
-            format_dict = {}
-            for col in view.columns:
-                if pd.api.types.is_numeric_dtype(view[col]) and col != "진도율":
-                    format_dict[col] = "{:,.0f}"
-            styled = apply_alignment(
-                view.style.format(format_dict, na_rep=""),
-                view,
-            )
-            st.dataframe(
-                styled,
-                width="stretch",
-                height=calc_table_height(len(view), max_height=520),
-            )
-
     with tab_inventory:
         st.subheader("재고현황")
         inventory_path = Path("깃허브_재고현황_요약.csv")
@@ -2353,16 +2300,90 @@ def main():
                 else 0
             )
             month_target_value = month_target_daily * month_workdays_value
+            if selected_date.year == 2026 and selected_date.month == 1:
+                month_target_value = 5_000_000
             month_rate_value = (
                 month_actual_value / month_target_value if month_target_value else 0
             )
 
+            prev_month_date = selected_date - pd.DateOffset(months=1)
+            prev_month_start = prev_month_date.replace(day=1)
+            prev_month_end = prev_month_start + pd.offsets.MonthEnd(0)
+            prev_month_actual_base = daily_actuals[
+                (daily_actuals["일자"] >= prev_month_start)
+                & (daily_actuals["일자"] <= prev_month_end)
+                & (daily_actuals["공정코드"] == "[80]")
+            ]
+            prev_month_actual_value = prev_month_actual_base[actual_col].sum()
+            prev_month_workdays = prev_month_actual_base[
+                prev_month_actual_base["실제근무"]
+            ]["일자"].nunique()
+            prev_month_targets = targets[
+                (targets["연"] == prev_month_date.year)
+                & (targets["월"] == prev_month_date.month)
+                & (targets["공정코드"] == "[80]")
+            ]
+            prev_month_target_daily = (
+                prev_month_targets["일일_생산목표량"].sum()
+                if not prev_month_targets.empty
+                else 0
+            )
+            prev_month_workdays_value = workdays[
+                (workdays["연"] == prev_month_date.year)
+                & (workdays["월"] == prev_month_date.month)
+            ]
+            prev_month_workdays_value = (
+                prev_month_workdays_value["기준자료근무일수"].iloc[0]
+                if not prev_month_workdays_value.empty
+                else 0
+            )
+            prev_month_target_value = prev_month_target_daily * prev_month_workdays_value
+            if prev_month_date.year == 2026 and prev_month_date.month == 1:
+                prev_month_target_value = 5_000_000
+            prev_month_rate_value = (
+                prev_month_actual_value / prev_month_target_value
+                if prev_month_target_value
+                else 0
+            )
+
+            prev_month_label = f"{prev_month_date.month}월"
+            prev_cols = st.columns(5)
+            prev_cols[0].metric(
+                f"{prev_month_label}목표", f"{int(prev_month_target_value):,}"
+            )
+            prev_cols[1].metric(
+                f"{prev_month_label}실적", f"{int(prev_month_actual_value):,}"
+            )
+            prev_cols[2].metric(
+                f"{prev_month_label} 실적달성율",
+                f"{prev_month_rate_value * 100:.2f}%",
+            )
+            prev_cols[3].metric(
+                f"{prev_month_label} 실근무일", f"{int(prev_month_workdays):,}"
+            )
+            prev_cols[4].markdown("")
+
             month_label = f"{selected_date.month}월"
-            kpi_cols = st.columns(4)
+            kpi_cols = st.columns(5)
             kpi_cols[0].metric(f"{month_label}목표", f"{int(month_target_value):,}")
             kpi_cols[1].metric(f"{month_label}실적", f"{int(month_actual_value):,}")
+            projected_value = None
+            remaining_days = None
+            effective_workdays = month_workdays_value
+            if selected_date.year == 2026 and selected_date.month == 2:
+                effective_workdays = 25
+            if effective_workdays:
+                avg_daily = month_actual_value / max(month_workdays, 1)
+                remaining_days = max(int(effective_workdays - month_workdays), 0)
+                projected_value = month_actual_value + avg_daily * remaining_days
             kpi_cols[2].metric("실적달성율", f"{month_rate_value * 100:.2f}%")
             kpi_cols[3].metric("실근무일", f"{int(month_workdays):,}")
+            if projected_value is None:
+                kpi_cols[4].metric(f"{month_label}예상", "-")
+            else:
+                kpi_cols[4].metric(f"{month_label}예상", f"{int(projected_value):,}")
+                with kpi_cols[4]:
+                    st.caption(f"잔여 {remaining_days}일 기준")
 
             color_clear_note = None
             if (
@@ -3178,6 +3199,237 @@ def main():
             # 1) 일일_생산목표량은 일당 목표로 가정.
             # 2) 실제근무일수는 (양품수량 > 0 또는 생산수량 > 0) 기준.
             # 3) 공정코드 값은 실적/목표 파일에 동일하게 존재한다고 가정.
+
+    def build_progress_view(view_df, sample_rule):
+        if view_df.empty:
+            return None, None
+        df_view = view_df.copy()
+        df_view["수량"] = pd.to_numeric(df_view.get("수량", 0), errors="coerce").fillna(0)
+        df_view["생산필요량"] = pd.to_numeric(
+            df_view.get("생산필요량", 0), errors="coerce"
+        ).fillna(0)
+        if "출고예상일" in df_view.columns:
+            df_view["출고예상일"] = pd.to_datetime(
+                df_view["출고예상일"], errors="coerce"
+            )
+        df_view["구분"] = df_view.apply(sample_rule, axis=1)
+        df_view["월"] = df_view["출고예상일"].dt.to_period("M").astype(str)
+        df_view["진도율"] = df_view.apply(
+            lambda row: (1 - (row["생산필요량"] / row["수량"])) * 100
+            if row["수량"] > 0
+            else 0,
+            axis=1,
+        )
+        summary = (
+            df_view.groupby(["월", "구분"], dropna=False)[["수량", "생산필요량"]]
+            .sum()
+            .reset_index()
+        )
+        summary["진도율"] = summary.apply(
+            lambda row: (1 - (row["생산필요량"] / row["수량"])) * 100
+            if row["수량"] > 0
+            else 0,
+            axis=1,
+        )
+        summary = summary.sort_values(["월", "구분"])
+        return df_view, summary
+
+    with tab_micellia:
+        st.subheader("미셀리아 진행현황")
+        micellia_mask = filtered_base["품명"].astype(str).str.contains(
+            "Deep Black|Lake Gray|Mute Brown", case=False, na=False
+        )
+        micellia_df = filtered_base[micellia_mask].copy()
+
+        def micellia_sample_rule(row):
+            name = str(row.get("품명", "")).lower()
+            if "샘플" in name or "4p" in name:
+                return "샘플"
+            return "본품"
+
+        micellia_view, micellia_summary = build_progress_view(
+            micellia_df, micellia_sample_rule
+        )
+        if micellia_view is None or micellia_view.empty:
+            st.info("미셀리아 대상 수주가 없습니다.")
+        else:
+            total_qty = micellia_view["수량"].sum()
+            total_need = micellia_view["생산필요량"].sum()
+            total_ratio = (
+                (1 - (total_need / total_qty)) * 100 if total_qty > 0 else 0
+            )
+            kpi = st.columns(3)
+            kpi[0].metric("요청수량 합계", fmt_int(total_qty))
+            kpi[1].metric("생산필요량 합계", fmt_int(total_need))
+            kpi[2].metric("진도율", f"{fmt_ratio(total_ratio)}%")
+
+            st.markdown("### 출고일별 진행현황 (본품/샘플)")
+            micellia_view["출고일자"] = format_date_series(
+                micellia_view["출고예상일"]
+            )
+            def micellia_group(name):
+                text = str(name).lower()
+                if "deep black" in text:
+                    return "Deep Black"
+                if "lake gray" in text:
+                    return "Lake Gray"
+                if "mute brown" in text:
+                    return "Mute Brown"
+                return "기타"
+
+            micellia_view["품목구분"] = micellia_view["품명"].apply(micellia_group)
+            pivot = (
+                micellia_view.groupby(["출고일자", "품목구분", "구분"], dropna=False)[
+                    "수량"
+                ]
+                .sum()
+                .reset_index()
+            )
+            pivot_table = pivot.pivot_table(
+                index="출고일자",
+                columns=["품목구분", "구분"],
+                values="수량",
+                fill_value=0,
+                aggfunc="sum",
+            )
+            product_order = ["Deep Black", "Lake Gray", "Mute Brown"]
+            sample_order = ["본품", "샘플"]
+            ordered_cols = []
+            for product in product_order:
+                for sample in sample_order:
+                    if (product, sample) in pivot_table.columns:
+                        ordered_cols.append((product, sample))
+            if ordered_cols:
+                pivot_table = pivot_table[ordered_cols]
+            pivot_table = pivot_table.sort_index()
+            pivot_table = pivot_table.applymap(lambda v: int(v) if v else 0)
+            pivot_table = pivot_table.rename_axis(index="출고일")
+            pivot_table_display = pivot_table.copy()
+            pivot_table_display.columns = [
+                f"{prod} ({kind})" for prod, kind in pivot_table_display.columns
+            ]
+            pivot_table_display = pivot_table_display.applymap(fmt_int)
+            pivot_styled = apply_alignment(
+                pivot_table_display.style, pivot_table_display
+            )
+            render_dataframe(
+                pivot_styled,
+                pivot_table_display,
+                width="stretch",
+                height=calc_table_height(len(pivot_table_display), max_height=360),
+            )
+
+            st.markdown("### 미셀리아 상세 리스트")
+            view_cols = [
+                col
+                for col in [
+                    "출고예상일",
+                    "품명",
+                    "생산품명",
+                    "품목코드",
+                    "수량",
+                    "생산필요량",
+                    "구분",
+                ]
+                if col in micellia_view.columns
+            ]
+            micellia_view = micellia_view.sort_values("출고예상일")
+            micellia_view["출고예상일"] = format_date_series(
+                micellia_view["출고예상일"]
+            )
+            micellia_view["수량"] = micellia_view["수량"].apply(fmt_int)
+            micellia_view["생산필요량"] = micellia_view["생산필요량"].apply(fmt_int)
+            list_df = micellia_view[view_cols]
+            list_styled = apply_alignment(list_df.style, list_df)
+            render_dataframe(
+                list_styled,
+                list_df,
+                width="stretch",
+                height=calc_table_height(len(list_df), max_height=420),
+            )
+
+    with tab_tiktok:
+        st.subheader("틱톡글로벌 진행현황")
+        tiktok_df = filtered_base[
+            filtered_base["이니셜"].astype(str).str.strip() == "틱톡글로벌"
+        ].copy()
+
+        def tiktok_sample_rule(row):
+            country = str(row.get("수출국가", "")).strip()
+            if country.startswith("예외:") or country == "예외":
+                return "샘플"
+            return "본품"
+
+        tiktok_view, tiktok_summary = build_progress_view(
+            tiktok_df, tiktok_sample_rule
+        )
+        if tiktok_view is None or tiktok_view.empty:
+            st.info("틱톡글로벌 대상 수주가 없습니다.")
+        else:
+            total_qty = tiktok_view["수량"].sum()
+            total_need = tiktok_view["생산필요량"].sum()
+            total_ratio = (
+                (1 - (total_need / total_qty)) * 100 if total_qty > 0 else 0
+            )
+            kpi = st.columns(3)
+            kpi[0].metric("요청수량 합계", fmt_int(total_qty))
+            kpi[1].metric("생산필요량 합계", fmt_int(total_need))
+            kpi[2].metric("진도율", f"{fmt_ratio(total_ratio)}%")
+
+            st.markdown("### 품명별 집계 현황")
+            name_summary = (
+                tiktok_view.groupby(["품명", "구분"], dropna=False)[["수량", "생산필요량"]]
+                .sum()
+                .reset_index()
+            )
+            name_summary["진도율"] = name_summary.apply(
+                lambda row: (1 - (row["생산필요량"] / row["수량"])) * 100
+                if row["수량"] > 0
+                else 0,
+                axis=1,
+            )
+            name_summary["수주수량"] = name_summary["수량"].apply(fmt_int)
+            name_summary["생산필요량"] = name_summary["생산필요량"].apply(fmt_int)
+            name_summary["진도율"] = name_summary["진도율"].apply(
+                lambda v: f"{fmt_ratio(v)}%"
+            )
+            name_summary = name_summary[
+                ["품명", "구분", "수주수량", "생산필요량", "진도율"]
+            ]
+            name_styled = apply_alignment(name_summary.style, name_summary)
+            render_dataframe(
+                name_styled,
+                name_summary,
+                width="stretch",
+                height=calc_table_height(len(name_summary), max_height=360),
+            )
+
+            st.markdown("### 틱톡글로벌 상세 리스트")
+            view_cols = [
+                col
+                for col in [
+                    "출고예상일",
+                    "품명",
+                    "생산품명",
+                    "품목코드",
+                    "수량",
+                    "생산필요량",
+                    "구분",
+                ]
+                if col in tiktok_view.columns
+            ]
+            tiktok_view = tiktok_view.sort_values("출고예상일")
+            tiktok_view["출고예상일"] = format_date_series(tiktok_view["출고예상일"])
+            tiktok_view["수량"] = tiktok_view["수량"].apply(fmt_int)
+            tiktok_view["생산필요량"] = tiktok_view["생산필요량"].apply(fmt_int)
+            list_df = tiktok_view[view_cols]
+            list_styled = apply_alignment(list_df.style, list_df)
+            render_dataframe(
+                list_styled,
+                list_df,
+                width="stretch",
+                height=calc_table_height(len(list_df), max_height=420),
+            )
 
 
 if __name__ == "__main__":

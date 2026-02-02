@@ -14,6 +14,7 @@ FX_FILE = "월별업데이트_환율기준.csv"
 WORKDAYS_FILE = "근무일수(기준자료).csv"
 TARGET_FILE = "월별업데이트_생산목표량.csv"
 GOAL_SUMMARY_FILE = "깃허브_S관공장목표현황_요약.csv"
+PACKAGING_SUMMARY_FILE = "깃허브_미셀리아_틱톡_포장요약.csv"
 FAST_MODE_KEY = "fast_mode"
 MAX_STYLE_ROWS = 1500
 SPEC_NUMBER_RE = re.compile(r"[+-]\d+\.\d{2}")
@@ -423,6 +424,16 @@ def load_goal_summary():
         df["월"] = df["일자"].dt.month
     if "실제근무" not in df.columns:
         df["실제근무"] = (df["실적_양품"] > 0) | (df["생산수량"] > 0)
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_packaging_summary():
+    path = Path(PACKAGING_SUMMARY_FILE)
+    if not path.exists():
+        return pd.DataFrame()
+    df = load_data(path)
+    df.columns = [c.strip() for c in df.columns]
     return df
 
 
@@ -3234,6 +3245,57 @@ def main():
         summary = summary.sort_values(["월", "구분"])
         return df_view, summary
 
+    def apply_fifo_allocation(view_df, pack_by_sale):
+        if view_df.empty:
+            return view_df
+        alloc_df = view_df.copy()
+        alloc_df["출고예상일"] = pd.to_datetime(alloc_df["출고예상일"], errors="coerce")
+        alloc_df["수주일자"] = pd.to_datetime(alloc_df.get("수주일자", None), errors="coerce")
+        alloc_df["수량"] = pd.to_numeric(alloc_df.get("수량", 0), errors="coerce").fillna(0)
+        alloc_df["완제품"] = pd.to_numeric(alloc_df.get("완제품", 0), errors="coerce").fillna(0)
+        alloc_df["포장배정"] = 0.0
+        alloc_df["완제품배정"] = 0.0
+        alloc_df["재계산_생산필요량"] = 0.0
+
+        # available pack by sale code
+        pack_available = {str(k).strip(): float(v) for k, v in pack_by_sale.items()}
+        # available finished stock by item code (use max per item to avoid double count)
+        finished_available = (
+            alloc_df.groupby("품목코드")["완제품"].max().fillna(0).to_dict()
+            if "품목코드" in alloc_df.columns
+            else {}
+        )
+
+        sort_cols = ["출고예상일", "수주일자"]
+        alloc_df = alloc_df.sort_values(
+            by=sort_cols, ascending=True, na_position="last"
+        ).reset_index(drop=True)
+
+        for idx, row in alloc_df.iterrows():
+            sale_code = str(row.get("판매코드", "")).strip()
+            item_code = str(row.get("품목코드", "")).strip()
+            order_qty = float(row.get("수량", 0))
+            if order_qty <= 0:
+                continue
+
+            # allocate packaging first
+            pack_left = pack_available.get(sale_code, 0.0)
+            pack_alloc = min(order_qty, pack_left) if pack_left > 0 else 0.0
+            pack_available[sale_code] = max(pack_left - pack_alloc, 0.0)
+            remaining = max(order_qty - pack_alloc, 0.0)
+
+            # allocate finished goods next (by item code)
+            finish_left = finished_available.get(item_code, 0.0)
+            finish_alloc = min(remaining, finish_left) if finish_left > 0 else 0.0
+            finished_available[item_code] = max(finish_left - finish_alloc, 0.0)
+            remaining = max(remaining - finish_alloc, 0.0)
+
+            alloc_df.at[idx, "포장배정"] = pack_alloc
+            alloc_df.at[idx, "완제품배정"] = finish_alloc
+            alloc_df.at[idx, "재계산_생산필요량"] = remaining
+
+        return alloc_df
+
     with tab_micellia:
         st.subheader("미셀리아 진행현황")
         micellia_mask = filtered_base["품명"].astype(str).str.contains(
@@ -3255,13 +3317,46 @@ def main():
         else:
             total_qty = micellia_view["수량"].sum()
             total_need = micellia_view["생산필요량"].sum()
+            remaining_specs = (
+                micellia_view.loc[micellia_view["생산필요량"] > 0, "판매코드"]
+                .astype(str)
+                .str.strip()
+                .nunique()
+                if "판매코드" in micellia_view.columns
+                else 0
+            )
+            pack_summary = load_packaging_summary()
+            pack_summary = pack_summary[
+                pack_summary["구분"].astype(str).str.strip() == "미셀리아"
+            ] if not pack_summary.empty else pack_summary
+            if pack_summary is not None and not pack_summary.empty:
+                total_pack = pack_summary["포장수량"].sum()
+                total_linked = pack_summary["연관포장수량"].sum()
+                total_extra = pack_summary["초과포장수량"].sum()
+                pack_ratio = (total_linked / total_pack) * 100 if total_pack else 0
+                pack_by_sale = (
+                    pack_summary.groupby("판매코드")["포장수량"].sum().to_dict()
+                )
+            else:
+                total_pack = 0
+                total_linked = 0
+                total_extra = 0
+                pack_ratio = 0
+                pack_by_sale = {}
+            total_pack_possible = 0
             total_ratio = (
                 (1 - (total_need / total_qty)) * 100 if total_qty > 0 else 0
             )
-            kpi = st.columns(3)
+            kpi = st.columns(4)
             kpi[0].metric("요청수량 합계", fmt_int(total_qty))
-            kpi[1].metric("생산필요량 합계", fmt_int(total_need))
-            kpi[2].metric("진도율", f"{fmt_ratio(total_ratio)}%")
+            kpi[1].metric("포장수량 합계", fmt_int(total_pack))
+            if pack_ratio:
+                kpi[1].caption(f"정합률 {fmt_ratio(pack_ratio)}%")
+            kpi[2].metric("연관포장수량", fmt_int(total_linked))
+            kpi[3].metric("초과포장수량", fmt_int(total_extra))
+            st.caption(
+                f"포장가능수량(완제품) {fmt_int(total_pack_possible)} · 잔여생산필요량 {fmt_int(total_need)} · 남은 규격 {fmt_int(remaining_specs)} · 진도율 {fmt_ratio(total_ratio)}%"
+            )
 
             st.markdown("### 출고일별 진행현황 (본품/샘플)")
             micellia_view["출고일자"] = format_date_series(
@@ -3320,6 +3415,18 @@ def main():
             )
 
             st.markdown("### 미셀리아 상세 리스트")
+            if "완제품" in micellia_view.columns:
+                micellia_view["완제품"] = pd.to_numeric(
+                    micellia_view["완제품"], errors="coerce"
+                ).fillna(0)
+            else:
+                micellia_view["완제품"] = 0
+            fifo_view = apply_fifo_allocation(micellia_view, pack_by_sale)
+            micellia_view = fifo_view
+            micellia_view["포장수량"] = micellia_view["포장배정"].fillna(0)
+            micellia_view["포장가능수량"] = micellia_view["완제품배정"].fillna(0)
+            micellia_view["생산필요량"] = micellia_view["재계산_생산필요량"].fillna(0)
+            total_pack_possible = micellia_view["포장가능수량"].sum()
             view_cols = [
                 col
                 for col in [
@@ -3328,6 +3435,9 @@ def main():
                     "생산품명",
                     "품목코드",
                     "수량",
+                    "포장수량",
+                    "완제품",
+                    "포장가능수량",
                     "생산필요량",
                     "구분",
                 ]
@@ -3338,6 +3448,9 @@ def main():
                 micellia_view["출고예상일"]
             )
             micellia_view["수량"] = micellia_view["수량"].apply(fmt_int)
+            micellia_view["포장수량"] = micellia_view["포장수량"].apply(fmt_int)
+            micellia_view["완제품"] = micellia_view["완제품"].apply(fmt_int)
+            micellia_view["포장가능수량"] = micellia_view["포장가능수량"].apply(fmt_int)
             micellia_view["생산필요량"] = micellia_view["생산필요량"].apply(fmt_int)
             list_df = micellia_view[view_cols]
             list_styled = apply_alignment(list_df.style, list_df)
@@ -3368,13 +3481,46 @@ def main():
         else:
             total_qty = tiktok_view["수량"].sum()
             total_need = tiktok_view["생산필요량"].sum()
+            remaining_specs = (
+                tiktok_view.loc[tiktok_view["생산필요량"] > 0, "판매코드"]
+                .astype(str)
+                .str.strip()
+                .nunique()
+                if "판매코드" in tiktok_view.columns
+                else 0
+            )
+            pack_summary = load_packaging_summary()
+            pack_summary = pack_summary[
+                pack_summary["구분"].astype(str).str.strip() == "틱톡글로벌"
+            ] if not pack_summary.empty else pack_summary
+            if pack_summary is not None and not pack_summary.empty:
+                total_pack = pack_summary["포장수량"].sum()
+                total_linked = pack_summary["연관포장수량"].sum()
+                total_extra = pack_summary["초과포장수량"].sum()
+                pack_ratio = (total_linked / total_pack) * 100 if total_pack else 0
+                pack_by_sale = (
+                    pack_summary.groupby("판매코드")["포장수량"].sum().to_dict()
+                )
+            else:
+                total_pack = 0
+                total_linked = 0
+                total_extra = 0
+                pack_ratio = 0
+                pack_by_sale = {}
+            total_pack_possible = 0
             total_ratio = (
                 (1 - (total_need / total_qty)) * 100 if total_qty > 0 else 0
             )
-            kpi = st.columns(3)
+            kpi = st.columns(4)
             kpi[0].metric("요청수량 합계", fmt_int(total_qty))
-            kpi[1].metric("생산필요량 합계", fmt_int(total_need))
-            kpi[2].metric("진도율", f"{fmt_ratio(total_ratio)}%")
+            kpi[1].metric("포장수량 합계", fmt_int(total_pack))
+            if pack_ratio:
+                kpi[1].caption(f"정합률 {fmt_ratio(pack_ratio)}%")
+            kpi[2].metric("연관포장수량", fmt_int(total_linked))
+            kpi[3].metric("초과포장수량", fmt_int(total_extra))
+            st.caption(
+                f"포장가능수량(완제품) {fmt_int(total_pack_possible)} · 잔여생산필요량 {fmt_int(total_need)} · 남은 규격 {fmt_int(remaining_specs)} · 진도율 {fmt_ratio(total_ratio)}%"
+            )
 
             st.markdown("### 품명별 집계 현황")
             name_summary = (
@@ -3405,6 +3551,18 @@ def main():
             )
 
             st.markdown("### 틱톡글로벌 상세 리스트")
+            if "완제품" in tiktok_view.columns:
+                tiktok_view["완제품"] = pd.to_numeric(
+                    tiktok_view["완제품"], errors="coerce"
+                ).fillna(0)
+            else:
+                tiktok_view["완제품"] = 0
+            fifo_view = apply_fifo_allocation(tiktok_view, pack_by_sale)
+            tiktok_view = fifo_view
+            tiktok_view["포장수량"] = tiktok_view["포장배정"].fillna(0)
+            tiktok_view["포장가능수량"] = tiktok_view["완제품배정"].fillna(0)
+            tiktok_view["생산필요량"] = tiktok_view["재계산_생산필요량"].fillna(0)
+            total_pack_possible = tiktok_view["포장가능수량"].sum()
             view_cols = [
                 col
                 for col in [
@@ -3413,6 +3571,9 @@ def main():
                     "생산품명",
                     "품목코드",
                     "수량",
+                    "포장수량",
+                    "완제품",
+                    "포장가능수량",
                     "생산필요량",
                     "구분",
                 ]
@@ -3421,6 +3582,9 @@ def main():
             tiktok_view = tiktok_view.sort_values("출고예상일")
             tiktok_view["출고예상일"] = format_date_series(tiktok_view["출고예상일"])
             tiktok_view["수량"] = tiktok_view["수량"].apply(fmt_int)
+            tiktok_view["포장수량"] = tiktok_view["포장수량"].apply(fmt_int)
+            tiktok_view["완제품"] = tiktok_view["완제품"].apply(fmt_int)
+            tiktok_view["포장가능수량"] = tiktok_view["포장가능수량"].apply(fmt_int)
             tiktok_view["생산필요량"] = tiktok_view["생산필요량"].apply(fmt_int)
             list_df = tiktok_view[view_cols]
             list_styled = apply_alignment(list_df.style, list_df)

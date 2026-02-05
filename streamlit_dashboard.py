@@ -276,6 +276,8 @@ def aggregate_production(view):
 
     pack_col = find_first_column(view.columns, PACK_COL_CANDIDATES)
     key_cols = [col for col in ["이니셜", "품목코드", "수주번호"] if col in view.columns]
+    if "출고예상일" in view.columns:
+        key_cols.append("출고예상일")
     if pack_col:
         key_cols.append(pack_col)
     if key_cols:
@@ -319,7 +321,9 @@ def aggregate_production(view):
             agg[col] = representative_name if col == "품명" else join_unique
 
     view_without_stock = view.drop(columns=stock_cols_available, errors="ignore")
-    grouped = view_without_stock.groupby("품목코드", dropna=False).agg(agg).reset_index()
+    grouped = (
+        view_without_stock.groupby(["품목코드"], dropna=False).agg(agg).reset_index()
+    )
     if stock_cols_available:
         grouped = grouped.merge(stock_data, on="품목코드", how="left")
     return grouped
@@ -3316,15 +3320,6 @@ def main():
             st.info("미셀리아 대상 수주가 없습니다.")
         else:
             total_qty = micellia_view["수량"].sum()
-            total_need = micellia_view["생산필요량"].sum()
-            remaining_specs = (
-                micellia_view.loc[micellia_view["생산필요량"] > 0, "판매코드"]
-                .astype(str)
-                .str.strip()
-                .nunique()
-                if "판매코드" in micellia_view.columns
-                else 0
-            )
             pack_summary = load_packaging_summary()
             pack_summary = pack_summary[
                 pack_summary["구분"].astype(str).str.strip() == "미셀리아"
@@ -3343,16 +3338,30 @@ def main():
                 total_extra = 0
                 pack_ratio = 0
                 pack_by_sale = {}
-            total_pack_possible = 0
+            fifo_view = apply_fifo_allocation(micellia_view, pack_by_sale)
+            fifo_view = fifo_view.copy()
+            fifo_view["포장수량"] = fifo_view["포장배정"].fillna(0)
+            fifo_view["포장가능수량"] = fifo_view["완제품배정"].fillna(0)
+            total_pack_alloc = fifo_view["포장수량"].sum()
+            total_pack_possible = fifo_view["포장가능수량"].sum()
+            total_need = fifo_view["생산필요량"].sum()
+            remaining_specs = (
+                fifo_view.loc[fifo_view["생산필요량"] > 0, "판매코드"]
+                .astype(str)
+                .str.strip()
+                .nunique()
+                if "판매코드" in fifo_view.columns
+                else 0
+            )
             total_ratio = (
                 (1 - (total_need / total_qty)) * 100 if total_qty > 0 else 0
             )
             kpi = st.columns(4)
             kpi[0].metric("요청수량 합계", fmt_int(total_qty))
-            kpi[1].metric("포장수량 합계", fmt_int(total_pack))
+            kpi[1].metric("포장수량 합계", fmt_int(total_pack_alloc))
             if pack_ratio:
                 kpi[1].caption(f"정합률 {fmt_ratio(pack_ratio)}%")
-            kpi[2].metric("연관포장수량", fmt_int(total_linked))
+            kpi[2].metric("전체포장수량", fmt_int(total_pack))
             kpi[3].metric("초과포장수량", fmt_int(total_extra))
             st.caption(
                 f"포장가능수량(완제품) {fmt_int(total_pack_possible)} · 잔여생산필요량 {fmt_int(total_need)} · 남은 규격 {fmt_int(remaining_specs)} · 진도율 {fmt_ratio(total_ratio)}%"
@@ -3421,12 +3430,7 @@ def main():
                 ).fillna(0)
             else:
                 micellia_view["완제품"] = 0
-            fifo_view = apply_fifo_allocation(micellia_view, pack_by_sale)
             micellia_view = fifo_view
-            micellia_view["포장수량"] = micellia_view["포장배정"].fillna(0)
-            micellia_view["포장가능수량"] = micellia_view["완제품배정"].fillna(0)
-            micellia_view["생산필요량"] = micellia_view["재계산_생산필요량"].fillna(0)
-            total_pack_possible = micellia_view["포장가능수량"].sum()
             view_cols = [
                 col
                 for col in [
@@ -3480,15 +3484,6 @@ def main():
             st.info("틱톡글로벌 대상 수주가 없습니다.")
         else:
             total_qty = tiktok_view["수량"].sum()
-            total_need = tiktok_view["생산필요량"].sum()
-            remaining_specs = (
-                tiktok_view.loc[tiktok_view["생산필요량"] > 0, "판매코드"]
-                .astype(str)
-                .str.strip()
-                .nunique()
-                if "판매코드" in tiktok_view.columns
-                else 0
-            )
             pack_summary = load_packaging_summary()
             pack_summary = pack_summary[
                 pack_summary["구분"].astype(str).str.strip() == "틱톡글로벌"
@@ -3507,16 +3502,30 @@ def main():
                 total_extra = 0
                 pack_ratio = 0
                 pack_by_sale = {}
-            total_pack_possible = 0
+            fifo_view = apply_fifo_allocation(tiktok_view, pack_by_sale)
+            fifo_view = fifo_view.copy()
+            fifo_view["포장수량"] = fifo_view["포장배정"].fillna(0)
+            fifo_view["포장가능수량"] = fifo_view["완제품배정"].fillna(0)
+            total_pack_alloc = fifo_view["포장수량"].sum()
+            total_pack_possible = fifo_view["포장가능수량"].sum()
+            total_need = fifo_view["생산필요량"].sum()
+            remaining_specs = (
+                fifo_view.loc[fifo_view["생산필요량"] > 0, "판매코드"]
+                .astype(str)
+                .str.strip()
+                .nunique()
+                if "판매코드" in fifo_view.columns
+                else 0
+            )
             total_ratio = (
                 (1 - (total_need / total_qty)) * 100 if total_qty > 0 else 0
             )
             kpi = st.columns(4)
             kpi[0].metric("요청수량 합계", fmt_int(total_qty))
-            kpi[1].metric("포장수량 합계", fmt_int(total_pack))
+            kpi[1].metric("포장수량 합계", fmt_int(total_pack_alloc))
             if pack_ratio:
                 kpi[1].caption(f"정합률 {fmt_ratio(pack_ratio)}%")
-            kpi[2].metric("연관포장수량", fmt_int(total_linked))
+            kpi[2].metric("전체포장수량", fmt_int(total_pack))
             kpi[3].metric("초과포장수량", fmt_int(total_extra))
             st.caption(
                 f"포장가능수량(완제품) {fmt_int(total_pack_possible)} · 잔여생산필요량 {fmt_int(total_need)} · 남은 규격 {fmt_int(remaining_specs)} · 진도율 {fmt_ratio(total_ratio)}%"
@@ -3557,12 +3566,7 @@ def main():
                 ).fillna(0)
             else:
                 tiktok_view["완제품"] = 0
-            fifo_view = apply_fifo_allocation(tiktok_view, pack_by_sale)
             tiktok_view = fifo_view
-            tiktok_view["포장수량"] = tiktok_view["포장배정"].fillna(0)
-            tiktok_view["포장가능수량"] = tiktok_view["완제품배정"].fillna(0)
-            tiktok_view["생산필요량"] = tiktok_view["재계산_생산필요량"].fillna(0)
-            total_pack_possible = tiktok_view["포장가능수량"].sum()
             view_cols = [
                 col
                 for col in [

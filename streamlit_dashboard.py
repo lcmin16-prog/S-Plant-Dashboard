@@ -441,6 +441,16 @@ def load_packaging_summary():
     return df
 
 
+@st.cache_data(show_spinner=False)
+def load_equipment_mapping(path):
+    file_path = Path(path)
+    if not file_path.exists():
+        return pd.DataFrame()
+    df = load_data(file_path)
+    df.columns = [c.strip() for c in df.columns]
+    return df
+
+
 def aggregate_actuals_from_daily(daily_df):
     if daily_df.empty:
         return pd.DataFrame(
@@ -1862,6 +1872,16 @@ def main():
                 )
 
     with tab_production:
+        urgent_df = pd.DataFrame()
+        if "수주번호" in filtered_base.columns and "이니셜" in filtered_base.columns:
+            urgent_df = filtered_base[
+                (filtered_base["수주번호"].astype(str).str.strip() == "202602060001")
+                & (filtered_base["이니셜"].astype(str).str.strip() == "긴급")
+            ]
+        if not urgent_df.empty:
+            st.subheader("긴급 수주 전용")
+            render_production_table(urgent_df, "긴급 수주", "urgent_only", show_warning=True)
+            st.markdown("---")
         color_tab, clear_tab = st.tabs(["Color", "Clear"])
         with color_tab:
             render_category_tabs(filtered_base[color_mask], "Color", "color")
@@ -1987,7 +2007,6 @@ def main():
                 )
                 if selection is not None:
                     render_selection_sum(view, selection.selection.rows, "선택 합계")
-
 
 
     with tab_goal:

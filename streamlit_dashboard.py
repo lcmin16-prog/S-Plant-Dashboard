@@ -1,5 +1,6 @@
 ﻿import re
 import math
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,8 @@ WORKDAYS_FILE = "근무일수(기준자료).csv"
 TARGET_FILE = "월별업데이트_생산목표량.csv"
 GOAL_SUMMARY_FILE = "깃허브_S관공장목표현황_요약.csv"
 PACKAGING_SUMMARY_FILE = "깃허브_미셀리아_틱톡_포장요약.csv"
+PRODUCT_NAME_FILE = "생산품명_집계.csv"
+BOM_MASTER_FILE = "BOM현황(전체).csv"
 FAST_MODE_KEY = "fast_mode"
 MAX_STYLE_ROWS = 1500
 SPEC_NUMBER_RE = re.compile(r"[+-]\d+\.\d{2}")
@@ -62,6 +65,25 @@ def find_first_column(columns, candidates):
         if name in columns:
             return name
     return None
+
+
+def code_numbers(code):
+    if not code:
+        return []
+    return [float(x) for x in SPEC_NUMBER_RE.findall(str(code))]
+
+
+def code_distance(code_a, code_b):
+    nums_a = code_numbers(code_a)
+    nums_b = code_numbers(code_b)
+    if not nums_a and not nums_b:
+        return 0.0
+    if not nums_a or not nums_b:
+        return 1e9
+    min_len = min(len(nums_a), len(nums_b))
+    dist = sum(abs(nums_a[i] - nums_b[i]) for i in range(min_len))
+    dist += abs(len(nums_a) - len(nums_b)) * 1000
+    return dist
 
 
 def normalize_numeric(series):
@@ -149,9 +171,7 @@ def add_spec_columns(view):
 
 
 def join_unique(series):
-    values = sorted(
-        {str(value).strip() for value in series if pd.notna(value) and str(value).strip()}
-    )
+    values = sorted({clean_text(value) for value in series if clean_text(value)})
     return ";".join(values) if values else ""
 
 
@@ -171,8 +191,17 @@ def normalize_name_tokens(text):
     return tokens
 
 
+def clean_text(value):
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "nat", "<na>"}:
+        return ""
+    return text
+
+
 def representative_name(series):
-    names = [str(value).strip() for value in series if pd.notna(value) and str(value).strip()]
+    names = [clean_text(value) for value in series if clean_text(value)]
     unique = list(dict.fromkeys(names))
     if not unique:
         return ""
@@ -193,7 +222,11 @@ def fill_object_na(frame):
     df = frame.copy()
     object_cols = df.select_dtypes(include=["object"]).columns
     if len(object_cols) > 0:
-        df[object_cols] = df[object_cols].fillna("")
+        df[object_cols] = (
+            df[object_cols]
+            .fillna("")
+            .replace({"nan": "", "None": "", "NaT": "", "<NA>": ""})
+        )
     return df
 
 
@@ -316,7 +349,7 @@ def aggregate_production(view):
             agg[col] = "sum"
     if "출고예상일" in view.columns:
         agg["출고예상일"] = "min"
-    for col in ["품명", "생산품명", "신규분류코드", "Q코드", "R코드"]:
+    for col in ["품명", "생산품명", "신규분류코드", "Q코드", "R코드", "판매코드"]:
         if col in view.columns:
             agg[col] = representative_name if col == "품명" else join_unique
 
@@ -327,6 +360,21 @@ def aggregate_production(view):
     if stock_cols_available:
         grouped = grouped.merge(stock_data, on="품목코드", how="left")
     return grouped
+
+
+def resolve_code_name(code, exact_map, candidates_by_prefix):
+    code_text = clean_text(code)
+    if not code_text:
+        return ""
+    exact = exact_map.get(code_text, "")
+    if exact:
+        return exact
+    prefix = code_text[:5]
+    candidates = candidates_by_prefix.get(prefix, [])
+    if not candidates:
+        return ""
+    best = min(candidates, key=lambda item: (code_distance(code_text, item[0]), item[0]))
+    return clean_text(best[1])
 
 
 def filter_need_rows(frame):
@@ -439,6 +487,91 @@ def load_packaging_summary():
     df = load_data(path)
     df.columns = [c.strip() for c in df.columns]
     return df
+
+
+@st.cache_data(show_spinner=False)
+def load_product_name_summary():
+    path = Path(PRODUCT_NAME_FILE)
+    if not path.exists():
+        return pd.DataFrame()
+    df = load_data(path)
+    df.columns = [c.strip() for c in df.columns]
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_bom_master_summary():
+    path = Path(BOM_MASTER_FILE)
+    if not path.exists():
+        return pd.DataFrame()
+    df = load_data(path)
+    df.columns = [c.strip() for c in df.columns]
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def build_code_name_lookup():
+    df = load_product_name_summary()
+    bom_df = load_bom_master_summary()
+    p_exact = {}
+    q_exact = {}
+    p_candidates = defaultdict(list)
+    q_candidates = defaultdict(list)
+    sale_exact = {}
+    sale_candidates = defaultdict(list)
+    category_by_p_prefix = {}
+
+    if not df.empty:
+        for _, row in df.iterrows():
+            p_code = clean_text(row.get("P_CODE", ""))
+            p_name = clean_text(row.get("P_생산품명", ""))
+            q_code = clean_text(row.get("Q_CODE", ""))
+            q_name = clean_text(row.get("Q_생산품명", ""))
+
+            if p_code and p_name:
+                if p_code not in p_exact:
+                    p_exact[p_code] = p_name
+                p_candidates[p_code[:5]].append((p_code, p_name))
+            if q_code and q_name:
+                if q_code not in q_exact:
+                    q_exact[q_code] = q_name
+                q_candidates[q_code[:5]].append((q_code, q_name))
+
+    if not bom_df.empty:
+        for _, row in bom_df.iterrows():
+            sale_code = clean_text(row.get("판매", ""))
+            sale_name = clean_text(row.get("판매명", ""))
+            p_code = clean_text(row.get("생산", ""))
+            p_name = clean_text(row.get("생산명", ""))
+            q_code = clean_text(row.get("분리", ""))
+            q_name = clean_text(row.get("분리명", ""))
+            category = clean_text(row.get("신규분류요약", ""))
+
+            if sale_code and sale_name:
+                if sale_code not in sale_exact:
+                    sale_exact[sale_code] = sale_name
+                sale_candidates[sale_code[:5]].append((sale_code, sale_name))
+
+            if p_code and p_name:
+                if p_code not in p_exact:
+                    p_exact[p_code] = p_name
+                p_candidates[p_code[:5]].append((p_code, p_name))
+            if q_code and q_name:
+                if q_code not in q_exact:
+                    q_exact[q_code] = q_name
+                q_candidates[q_code[:5]].append((q_code, q_name))
+            if p_code and category:
+                category_by_p_prefix.setdefault(p_code[:5], category)
+
+    return (
+        p_exact,
+        q_exact,
+        p_candidates,
+        q_candidates,
+        sale_exact,
+        sale_candidates,
+        category_by_p_prefix,
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -1466,12 +1599,71 @@ def main():
         if selection is not None:
             render_selection_sum(detail_df, selection.selection.rows, "선택 합계")
 
+    (
+        p_name_exact,
+        q_name_exact,
+        p_name_candidates,
+        q_name_candidates,
+        sale_name_exact,
+        sale_name_candidates,
+        category_by_p_prefix,
+    ) = build_code_name_lookup()
+
     def render_production_table(view_df, category_name, key_suffix, show_warning=False):
         st.markdown(f"**{category_name} 생산계획**")
         if view_df.empty:
             return
 
         aggregated = aggregate_production(view_df.copy())
+        if "품목코드" in aggregated.columns:
+            aggregated["생산품명(P코드)"] = aggregated["품목코드"].apply(
+                lambda code: resolve_code_name(code, p_name_exact, p_name_candidates)
+            )
+            if "생산품명" in aggregated.columns:
+                p_name_clean = aggregated["생산품명(P코드)"].apply(clean_text)
+                old_name_clean = aggregated["생산품명"].apply(clean_text)
+                aggregated["생산품명(P코드)"] = aggregated["생산품명(P코드)"].where(
+                    p_name_clean != "",
+                    old_name_clean,
+                )
+        if "Q코드" in aggregated.columns:
+            aggregated["생산품명(Q코드)"] = aggregated["Q코드"].apply(
+                lambda code: resolve_code_name(code, q_name_exact, q_name_candidates)
+            )
+        if "생산품명(P코드)" in aggregated.columns and "생산품명(Q코드)" in aggregated.columns:
+            q_name_clean = aggregated["생산품명(Q코드)"].apply(clean_text)
+            p_name_clean = aggregated["생산품명(P코드)"].apply(clean_text)
+            aggregated["생산품명(P코드)"] = aggregated["생산품명(P코드)"].where(
+                p_name_clean != "",
+                q_name_clean,
+            )
+            aggregated["생산품명(Q코드)"] = aggregated["생산품명(Q코드)"].where(
+                q_name_clean != "",
+                aggregated["생산품명(P코드)"].apply(clean_text),
+            )
+        if "품명" in aggregated.columns:
+            if "판매코드" in aggregated.columns:
+                sale_fallback = aggregated["판매코드"].apply(
+                    lambda code: resolve_code_name(code, sale_name_exact, sale_name_candidates)
+                )
+            else:
+                sale_fallback = pd.Series([""] * len(aggregated), index=aggregated.index)
+            if "생산품명(P코드)" in aggregated.columns:
+                sale_fallback_clean = sale_fallback.apply(clean_text)
+                sale_fallback = sale_fallback.where(
+                    sale_fallback_clean != "",
+                    aggregated["생산품명(P코드)"].apply(clean_text),
+                )
+            aggregated["품명"] = aggregated["품명"].where(
+                aggregated["품명"].apply(clean_text) != "",
+                sale_fallback,
+            )
+        if "신규분류코드" in aggregated.columns and "품목코드" in aggregated.columns:
+            category_fallback = aggregated["품목코드"].astype(str).str[:5].map(category_by_p_prefix).fillna("")
+            aggregated["신규분류코드"] = aggregated["신규분류코드"].where(
+                aggregated["신규분류코드"].apply(clean_text) != "",
+                category_fallback,
+            )
         add_spec_columns(aggregated)
         if "출고예상일" in aggregated.columns:
             aggregated["출고예상일"] = pd.to_datetime(
@@ -1503,7 +1695,7 @@ def main():
             "불용재고",
         ]
         need_cols = ["사출필요량", "분리필요량", "수화필요량", "접착필요량", "누수/규격필요량"]
-        columns = ["품명", "생산품명", "신규분류코드"]
+        columns = ["품명", "생산품명(P코드)", "생산품명(Q코드)", "신규분류코드"]
         if show_codes:
             columns.extend(["품목코드", "Q코드", "R코드"])
         columns.extend(
@@ -1872,16 +2064,6 @@ def main():
                 )
 
     with tab_production:
-        urgent_df = pd.DataFrame()
-        if "수주번호" in filtered_base.columns and "이니셜" in filtered_base.columns:
-            urgent_df = filtered_base[
-                (filtered_base["수주번호"].astype(str).str.strip() == "202602060001")
-                & (filtered_base["이니셜"].astype(str).str.strip() == "긴급")
-            ]
-        if not urgent_df.empty:
-            st.subheader("긴급 수주 전용")
-            render_production_table(urgent_df, "긴급 수주", "urgent_only", show_warning=True)
-            st.markdown("---")
         color_tab, clear_tab = st.tabs(["Color", "Clear"])
         with color_tab:
             render_category_tabs(filtered_base[color_mask], "Color", "color")

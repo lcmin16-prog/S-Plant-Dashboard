@@ -515,8 +515,10 @@ def build_code_name_lookup():
     bom_df = load_bom_master_summary()
     p_exact = {}
     q_exact = {}
+    r_exact = {}
     p_candidates = defaultdict(list)
     q_candidates = defaultdict(list)
+    r_candidates = defaultdict(list)
     sale_exact = {}
     sale_candidates = defaultdict(list)
     category_by_p_prefix = {}
@@ -527,6 +529,8 @@ def build_code_name_lookup():
             p_name = clean_text(row.get("P_생산품명", ""))
             q_code = clean_text(row.get("Q_CODE", ""))
             q_name = clean_text(row.get("Q_생산품명", ""))
+            r_code = clean_text(row.get("R_CODE", ""))
+            r_name = clean_text(row.get("R_생산품명", ""))
 
             if p_code and p_name:
                 if p_code not in p_exact:
@@ -536,6 +540,10 @@ def build_code_name_lookup():
                 if q_code not in q_exact:
                     q_exact[q_code] = q_name
                 q_candidates[q_code[:5]].append((q_code, q_name))
+            if r_code and r_name:
+                if r_code not in r_exact:
+                    r_exact[r_code] = r_name
+                r_candidates[r_code[:5]].append((r_code, r_name))
 
     if not bom_df.empty:
         for _, row in bom_df.iterrows():
@@ -545,6 +553,8 @@ def build_code_name_lookup():
             p_name = clean_text(row.get("생산명", ""))
             q_code = clean_text(row.get("분리", ""))
             q_name = clean_text(row.get("분리명", ""))
+            r_code = clean_text(row.get("사출", ""))
+            r_name = clean_text(row.get("사출명", ""))
             category = clean_text(row.get("신규분류요약", ""))
 
             if sale_code and sale_name:
@@ -560,14 +570,20 @@ def build_code_name_lookup():
                 if q_code not in q_exact:
                     q_exact[q_code] = q_name
                 q_candidates[q_code[:5]].append((q_code, q_name))
+            if r_code and r_name:
+                if r_code not in r_exact:
+                    r_exact[r_code] = r_name
+                r_candidates[r_code[:5]].append((r_code, r_name))
             if p_code and category:
                 category_by_p_prefix.setdefault(p_code[:5], category)
 
     return (
         p_exact,
         q_exact,
+        r_exact,
         p_candidates,
         q_candidates,
+        r_candidates,
         sale_exact,
         sale_candidates,
         category_by_p_prefix,
@@ -1602,8 +1618,10 @@ def main():
     (
         p_name_exact,
         q_name_exact,
+        r_name_exact,
         p_name_candidates,
         q_name_candidates,
+        r_name_candidates,
         sale_name_exact,
         sale_name_candidates,
         category_by_p_prefix,
@@ -1918,6 +1936,13 @@ def main():
         summary = summary[summary["R코드"].astype(str).str.strip() != ""]
         if "품명" not in summary.columns:
             summary["품명"] = ""
+        r_based_name = summary["R코드"].apply(
+            lambda code: resolve_code_name(code, r_name_exact, r_name_candidates)
+        )
+        summary["품명"] = r_based_name.where(
+            r_based_name.apply(clean_text) != "",
+            summary["품명"],
+        )
         if "사출창고" not in summary.columns:
             summary["사출창고"] = 0
         for col in ("생산필요량", "사출필요량", "사출창고"):

@@ -23,10 +23,10 @@
 미셀리아,Deep Black,본품,P0174A-07.00DBK3,S174-07.00,Clalen O2O2 D_Micelia_Deep Black_30P,7320,10110,7320,2790,72.4
 미셀리아,Deep Black,본품,P0174A-07.50DBK3,S174-07.50,Clalen O2O2 D_Micelia_Deep Black_30P,6570,15210,6570,8640,43.2
 미셀리아,Deep Black,본품,P0174A-08.00DBK3,S174-08.00,Clalen O2O2 D_Micelia_Deep Black_30P,5940,1230,1230,0,100.0
-미셀리아,Deep Black,샘플,P0174A-00.00DBK3,S260-00.00,Clalen O2O2 D_Deep Black_샘플(4P),9896,100,100,0,100.0
+미셀리아,Deep Black,샘플,P0174A-00.00DBK3,S260-00.00,Clalen O2O2 D_Deep Black_샘플(4P),9896,332,332,0,100.0
 미셀리아,Deep Black,샘플,P0174A-01.00DBK3,S260-01.00,Clalen O2O2 D_Deep Black_샘플(4P),5200,8,8,0,100.0
-미셀리아,Deep Black,샘플,P0174A-01.25DBK3,S260-01.25,Clalen O2O2 D_Deep Black_샘플(4P),5520,80,80,0,100.0
-미셀리아,Deep Black,샘플,P0174A-01.50DBK3,S260-01.50,Clalen O2O2 D_Deep Black_샘플(4P),4892,64,64,0,100.0
+미셀리아,Deep Black,샘플,P0174A-01.25DBK3,S260-01.25,Clalen O2O2 D_Deep Black_샘플(4P),5520,192,192,0,100.0
+미셀리아,Deep Black,샘플,P0174A-01.50DBK3,S260-01.50,Clalen O2O2 D_Deep Black_샘플(4P),4892,148,148,0,100.0
 미셀리아,Deep Black,샘플,P0174A-01.75DBK3,S260-01.75,Clalen O2O2 D_Deep Black_샘플(4P),4632,84,84,0,100.0
 미셀리아,Deep Black,샘플,P0174A-02.00DBK3,S260-02.00,Clalen O2O2 D_Deep Black_샘플(4P),4520,12,12,0,100.0
 미셀리아,Deep Black,샘플,P0174A-02.25DBK3,S260-02.25,Clalen O2O2 D_Deep Black_샘플(4P),5324,32,32,0,100.0
@@ -42,7 +42,7 @@
 미셀리아,Deep Black,샘플,P0174A-05.00DBK3,S260-05.00,Clalen O2O2 D_Deep Black_샘플(4P),4200,108,108,0,100.0
 미셀리아,Deep Black,샘플,P0174A-05.50DBK3,S260-05.50,Clalen O2O2 D_Deep Black_샘플(4P),5200,188,188,0,100.0
 미셀리아,Deep Black,샘플,P0174A-06.00DBK3,S260-06.00,Clalen O2O2 D_Deep Black_샘플(4P),4000,56,56,0,100.0
-미셀리아,Deep Black,샘플,P0174A-06.50DBK3,S260-06.50,Clalen O2O2 D_Deep Black_샘플(4P),3600,48,48,0,100.0
+미셀리아,Deep Black,샘플,P0174A-06.50DBK3,S260-06.50,Clalen O2O2 D_Deep Black_샘플(4P),3600,888,888,0,100.0
 미셀리아,Deep Black,샘플,P0174A-07.00DBK3,S260-07.00,Clalen O2O2 D_Deep Black_샘플(4P),2400,72,72,0,100.0
 미셀리아,Lake Gray,본품,P0175A-00.00LKG3,S175-00.00,Clalen O2O2 D_Micelia_Lake Gray_30P,32910,40410,32910,7500,81.44
 미셀리아,Lake Gray,본품,P0175A-01.00LKG3,S175-01.00,Clalen O2O2 D_Micelia_Lake Gray_30P,12390,17640,12390,5250,70.24
@@ -99,6 +99,8 @@
 미셀리아,Mute Brown,샘플,P0176A-04.25MBN3,S262-04.25,Clalen O2O2 D_Mute Brown_샘플(4P),2400,116,116,0,100.0
 미셀리아,Mute Brown,샘플,P0176A-04.75MBN3,S262-04.75,Clalen O2O2 D_Mute Brown_샘플(4P),2168,24,24,0,100.0
 미셀리아,Mute Brown,샘플,P0176A-05.00MBN3,S262-05.00,Clalen O2O2 D_Mute Brown_샘플(4P),2204,20,20,0,100.0
+미셀리아,Mute Brown,샘플,P0176A-07.00MBN3,S262-07.00,Clalen O2O2 D_Mute Brown_샘플(4P),2400,420,420,0,100.0
+미셀리아,Mute Brown,샘플,P0176A-07.50MBN3,S262-07.50,Clalen O2O2 D_Mute Brown_샘플(4P),0,420,0,420,0.0
 틱톡글로벌,,본품,P0174A-00.00DBK3,S174-00.00,Clalen O2O2 D_Micelia_Deep Black_30P,900,53910,900,53010,1.67
 틱톡글로벌,,본품,P0174A-01.00DBK3,S174-01.00,Clalen O2O2 D_Micelia_Deep Black_30P,450,10260,450,9810,4.39
 틱톡글로벌,,본품,P0174A-01.25DBK3,S174-01.25,Clalen O2O2 D_Micelia_Deep Black_30P,450,24690,450,24240,1.82

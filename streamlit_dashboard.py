@@ -1,5 +1,6 @@
 ﻿import re
 import math
+import io
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,16 @@ PROCESS_LABELS = {
     "[80]": "누수/규격검사",
 }
 PROCESS_KEYS = list(PROCESS_LABELS.keys())
+WORKDAY_OVERRIDES = {
+    (2026, 1): 27,  # Jan 2026 shutdown 3 days
+}
+REALTIME_NEED_COL_MAP = {
+    "사출필요량": "사출실적",
+    "분리필요량": "분리실적",
+    "수화필요량": "수화실적",
+    "접착필요량": "접착실적",
+    "누수/규격필요량": "누수실적",
+}
 
 
 def format_date_series(series):
@@ -407,6 +418,181 @@ def load_fx(path):
     raise last_error
 
 
+def normalize_realtime_process_code(value):
+    text = str(value).strip()
+    if not text:
+        return ""
+    if "[10]" in text or text == "10":
+        return "[10]"
+    if "[20]" in text or text == "20":
+        return "[20]"
+    if "[45]" in text or text == "45":
+        return "[45]"
+    if "[55]" in text or text == "55":
+        return "[55]"
+    if "[80]" in text or text == "80":
+        return "[80]"
+    digits = re.findall(r"\d+", text)
+    if digits:
+        code = digits[0]
+        if code in {"10", "20", "45", "55", "80"}:
+            return f"[{code}]"
+    return text
+
+
+def parse_realtime_actual_upload(uploaded_file):
+    if uploaded_file is None:
+        return None
+    raw = uploaded_file.getvalue()
+    actual_df = None
+    last_error = None
+    file_name = str(getattr(uploaded_file, "name", "")).lower()
+    is_excel = file_name.endswith(".xlsx") or file_name.endswith(".xls")
+    if is_excel:
+        try:
+            actual_df = pd.read_excel(io.BytesIO(raw))
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+    else:
+        for enc in ("utf-8-sig", "cp949", "euc-kr"):
+            try:
+                actual_df = pd.read_csv(
+                    io.BytesIO(raw),
+                    encoding=enc,
+                    low_memory=False,
+                )
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+    if actual_df is None:
+        return {"error": f"생산실적 파일을 읽을 수 없습니다: {last_error}"}
+
+    actual_df.columns = [str(col).strip() for col in actual_df.columns]
+    required = {"공정코드", "품목코드"}
+    missing = sorted(required - set(actual_df.columns))
+    if missing:
+        return {"error": f"업로드 파일 필수 컬럼 누락: {', '.join(missing)}"}
+
+    qty_col = None
+    for candidate in ("양품수량", "샘플제외 양품수량", "생산수량"):
+        if candidate in actual_df.columns:
+            qty_col = candidate
+            break
+    if qty_col is None:
+        return {"error": "업로드 파일에 수량 컬럼(양품수량/샘플제외 양품수량/생산수량)이 없습니다."}
+
+    if "상태" in actual_df.columns:
+        status_series = actual_df["상태"].astype(str).str.strip()
+        actual_df = actual_df[status_series == "확인"].copy()
+
+    if actual_df.empty:
+        return {
+            "maps": {key: {} for key in ("[10]", "[20]", "[45]", "[55]", "[80]")},
+            "last_date": "",
+            "rows": 0,
+            "qty_col": qty_col,
+        }
+
+    actual_df["품목코드"] = actual_df["품목코드"].astype(str).str.strip()
+    actual_df["공정코드"] = actual_df["공정코드"].apply(normalize_realtime_process_code)
+    actual_df[qty_col] = pd.to_numeric(actual_df[qty_col], errors="coerce").fillna(0)
+    actual_df = actual_df[actual_df["품목코드"] != ""]
+    actual_df = actual_df[actual_df["공정코드"].isin(["[10]", "[20]", "[45]", "[55]", "[80]"])]
+
+    date_text = ""
+    if "생산일자" in actual_df.columns:
+        date_series = pd.to_datetime(actual_df["생산일자"], errors="coerce")
+        if date_series.notna().any():
+            date_text = date_series.max().strftime("%Y-%m-%d")
+
+    maps = {}
+    for process in ("[10]", "[20]", "[45]", "[55]", "[80]"):
+        subset = actual_df[actual_df["공정코드"] == process]
+        if subset.empty:
+            maps[process] = {}
+        else:
+            maps[process] = (
+                subset.groupby("품목코드", dropna=False)[qty_col]
+                .sum()
+                .to_dict()
+            )
+
+    return {
+        "maps": maps,
+        "last_date": date_text,
+        "rows": int(len(actual_df)),
+        "qty_col": qty_col,
+    }
+
+
+@st.cache_data(show_spinner=False)
+def get_latest_actual_date_from_daily_files():
+    files = sorted(Path(".").glob("일별업데이트_생산실적현황*.csv"))
+    latest = pd.NaT
+    for path in files:
+        date_col_df = None
+        for enc in ("utf-8-sig", "cp949", "euc-kr"):
+            try:
+                date_col_df = pd.read_csv(
+                    path,
+                    encoding=enc,
+                    low_memory=False,
+                    usecols=lambda c: str(c).strip() == "생산일자",
+                )
+                break
+            except Exception:
+                continue
+        if date_col_df is None or "생산일자" not in date_col_df.columns:
+            continue
+        dates = pd.to_datetime(date_col_df["생산일자"], errors="coerce")
+        if dates.notna().any():
+            file_max = dates.max()
+            if pd.isna(latest) or file_max > latest:
+                latest = file_max
+    if pd.isna(latest):
+        return ""
+    return latest.strftime("%Y-%m-%d")
+
+
+def apply_realtime_actuals_to_aggregated(aggregated, realtime_ctx):
+    if not realtime_ctx or "maps" not in realtime_ctx:
+        return aggregated
+    view = aggregated.copy()
+    p_code = view["품목코드"].astype(str).str.strip() if "품목코드" in view.columns else pd.Series([""] * len(view), index=view.index)
+    q_code = view["Q코드"].astype(str).str.strip() if "Q코드" in view.columns else pd.Series([""] * len(view), index=view.index)
+    r_code = view["R코드"].astype(str).str.strip() if "R코드" in view.columns else pd.Series([""] * len(view), index=view.index)
+
+    view["사출실적"] = r_code.map(realtime_ctx["maps"].get("[10]", {})).fillna(0)
+    view["분리실적"] = q_code.map(realtime_ctx["maps"].get("[20]", {})).fillna(0)
+    view["수화실적"] = p_code.map(realtime_ctx["maps"].get("[45]", {})).fillna(0)
+    view["접착실적"] = p_code.map(realtime_ctx["maps"].get("[55]", {})).fillna(0)
+    view["누수실적"] = p_code.map(realtime_ctx["maps"].get("[80]", {})).fillna(0)
+
+    for need_col, actual_col in REALTIME_NEED_COL_MAP.items():
+        if need_col in view.columns:
+            view[need_col] = pd.to_numeric(view[need_col], errors="coerce").fillna(0)
+            view[need_col] = (view[need_col] - view[actual_col]).clip(lower=0)
+
+    if "생산필요량" in view.columns:
+        view["생산필요량"] = pd.to_numeric(view["생산필요량"], errors="coerce").fillna(0)
+        view["생산필요량"] = (view["생산필요량"] - view["누수실적"]).clip(lower=0)
+
+    return view
+
+
+def apply_realtime_actuals_to_injection(grouped, realtime_ctx):
+    if not realtime_ctx or "maps" not in realtime_ctx:
+        return grouped
+    view = grouped.copy()
+    view["사출실적"] = (
+        view["R코드"].astype(str).str.strip().map(realtime_ctx["maps"].get("[10]", {})).fillna(0)
+    )
+    if "사출필요량" in view.columns:
+        view["사출필요량"] = pd.to_numeric(view["사출필요량"], errors="coerce").fillna(0)
+        view["사출필요량"] = (view["사출필요량"] - view["사출실적"]).clip(lower=0)
+    return view
+
+
 @st.cache_data(show_spinner=False)
 def load_actuals():
     files = [
@@ -764,6 +950,15 @@ def preprocess_workdays(workdays):
     yearly["연"] = pd.to_numeric(yearly["연"], errors="coerce")
     yearly = yearly.rename(columns={"값": "기준자료근무일수"})
     merged = yearly.merge(base, on="월", how="left")
+    merged["연"] = pd.to_numeric(merged["연"], errors="coerce")
+    merged["월"] = pd.to_numeric(merged["월"], errors="coerce")
+    merged["기준자료근무일수"] = pd.to_numeric(
+        merged["기준자료근무일수"], errors="coerce"
+    ).fillna(0)
+    for (year, month), days in WORKDAY_OVERRIDES.items():
+        mask = (merged["연"] == year) & (merged["월"] == month)
+        if mask.any():
+            merged.loc[mask, "기준자료근무일수"] = days
     return merged[["연", "월", "기준자료근무일수", "기준근무일수"]]
 
 
@@ -1140,11 +1335,16 @@ def main():
     if not data_path.exists():
         st.error(f"파일을 찾을 수 없습니다: {DATA_FILE}")
         return
+    latest_actual_date = get_latest_actual_date_from_daily_files()
+    dashboard_update_text = latest_actual_date
     try:
         updated_at = datetime.fromtimestamp(data_path.stat().st_mtime)
-        st.caption(f"업데이트 일자: {updated_at:%Y-%m-%d}")
+        if not dashboard_update_text:
+            dashboard_update_text = updated_at.strftime("%Y-%m-%d")
+        st.caption(f"업데이트 일자: {dashboard_update_text}")
     except OSError:
-        pass
+        if dashboard_update_text:
+            st.caption(f"업데이트 일자: {dashboard_update_text}")
 
     try:
         df = load_data(data_path)
@@ -1202,8 +1402,53 @@ def main():
         value for value in df["신규분류코드"].dropna().unique().tolist() if value != ""
     )
 
+    realtime_ctx = None
+    realtime_last_date = ""
+    realtime_error = ""
+    realtime_rows = 0
+    realtime_qty_col = ""
+
     with st.sidebar:
         st.header("필터")
+        st.markdown("**생산실적 업로드(실시간 재계산)**")
+        guide_text = "생산실적 파일을 업로드하세요."
+        if dashboard_update_text:
+            try:
+                next_date = (
+                    pd.to_datetime(dashboard_update_text, errors="coerce")
+                    + pd.Timedelta(days=1)
+                )
+                if pd.notna(next_date):
+                    guide_text = (
+                        f"{next_date.strftime('%Y-%m-%d')} 이후 실적부터 등록하세요."
+                    )
+            except Exception:
+                pass
+        st.caption(guide_text)
+        uploaded_actual_file = st.file_uploader(
+            "생산실적 파일 업로드 (CSV/XLSX)",
+            type=["csv", "xlsx", "xls"],
+            key="realtime_actual_upload",
+        )
+        if uploaded_actual_file is not None:
+            realtime_result = parse_realtime_actual_upload(uploaded_actual_file)
+            if realtime_result and "error" in realtime_result:
+                realtime_error = realtime_result["error"]
+            else:
+                realtime_ctx = realtime_result
+                realtime_last_date = str(realtime_result.get("last_date", "")).strip()
+                realtime_rows = int(realtime_result.get("rows", 0))
+                realtime_qty_col = str(realtime_result.get("qty_col", "")).strip()
+        if realtime_error:
+            st.error(realtime_error)
+        elif realtime_ctx is not None:
+            if realtime_last_date:
+                st.success(
+                    f"업로드 반영 완료: {realtime_last_date} 기준 / {realtime_rows:,}행 / {realtime_qty_col}"
+                )
+            else:
+                st.success(f"업로드 반영 완료: {realtime_rows:,}행 / {realtime_qty_col}")
+        st.markdown("---")
         st.checkbox(
             "빠른 로딩(서식 최소화)",
             value=False,
@@ -1682,6 +1927,8 @@ def main():
                 aggregated["신규분류코드"].apply(clean_text) != "",
                 category_fallback,
             )
+        if realtime_ctx is not None:
+            aggregated = apply_realtime_actuals_to_aggregated(aggregated, realtime_ctx)
         add_spec_columns(aggregated)
         if "출고예상일" in aggregated.columns:
             aggregated["출고예상일"] = pd.to_datetime(
@@ -1713,6 +1960,7 @@ def main():
             "불용재고",
         ]
         need_cols = ["사출필요량", "분리필요량", "수화필요량", "접착필요량", "누수/규격필요량"]
+        actual_cols = ["사출실적", "분리실적", "수화실적", "접착실적", "누수실적"]
         columns = ["품명", "생산품명(P코드)", "생산품명(Q코드)", "신규분류코드"]
         if show_codes:
             columns.extend(["품목코드", "Q코드", "R코드"])
@@ -1721,6 +1969,7 @@ def main():
         )
         columns.extend([col for col in stock_cols if col in aggregated.columns])
         columns.extend([col for col in need_cols if col in aggregated.columns])
+        columns.extend([col for col in actual_cols if col in aggregated.columns])
         available = [col for col in columns if col in aggregated.columns]
         extra_cols = ["_sort_date"] if "_sort_date" in aggregated.columns else []
         view = aggregated[available + extra_cols].copy()
@@ -1753,6 +2002,8 @@ def main():
         for col in view.columns:
             if col in stock_cols:
                 top_labels.append("재고현황")
+            elif col in actual_cols:
+                top_labels.append("생산실적")
             elif col in need_cols:
                 top_labels.append("생산필요량")
             else:
@@ -1767,6 +2018,8 @@ def main():
 
             stock_first = ("재고현황", stock_cols[0]) if stock_cols else None
             stock_last = ("재고현황", stock_cols[-1]) if stock_cols else None
+            actual_first = ("생산실적", actual_cols[0]) if actual_cols else None
+            actual_last = ("생산실적", actual_cols[-1]) if actual_cols else None
             need_first = ("생산필요량", need_cols[0]) if need_cols else None
             need_last = ("생산필요량", need_cols[-1]) if need_cols else None
             if stock_first and stock_first in styles.columns:
@@ -1776,6 +2029,14 @@ def main():
             if stock_last and stock_last in styles.columns:
                 styles.loc[:, stock_last] = append_style(
                     styles.loc[:, stock_last], "border-right: 2px solid #777"
+                )
+            if actual_first and actual_first in styles.columns:
+                styles.loc[:, actual_first] = append_style(
+                    styles.loc[:, actual_first], "border-left: 2px solid #777"
+                )
+            if actual_last and actual_last in styles.columns:
+                styles.loc[:, actual_last] = append_style(
+                    styles.loc[:, actual_last], "border-right: 2px solid #777"
                 )
             if need_first and need_first in styles.columns:
                 styles.loc[:, need_first] = append_style(
@@ -1790,6 +2051,12 @@ def main():
                 if key in styles.columns:
                     styles.loc[:, key] = append_style(
                         styles.loc[:, key], "background-color: #EAF2FF"
+                    )
+            for col in actual_cols:
+                key = ("생산실적", col)
+                if key in styles.columns:
+                    styles.loc[:, key] = append_style(
+                        styles.loc[:, key], "background-color: #E8F9E8"
                     )
             for col in need_cols:
                 key = ("생산필요량", col)
@@ -1825,11 +2092,25 @@ def main():
                         "props": [("background-color", "#FFBE8C"), ("color", "#8A3B00")],
                     }
                 )
+            elif group == "생산실적":
+                header_styles.append(
+                    {
+                        "selector": f"th.col_heading.level0.col{idx}",
+                        "props": [("background-color", "#A4E8A4"), ("color", "#1F5D1F")],
+                    }
+                )
             if col in stock_cols:
                 header_styles.append(
                     {
                         "selector": f"th.col_heading.level1.col{idx}",
                         "props": [("background-color", "#C7DCFF"), ("color", "#0B3B8C")],
+                    }
+                )
+            elif col in actual_cols:
+                header_styles.append(
+                    {
+                        "selector": f"th.col_heading.level1.col{idx}",
+                        "props": [("background-color", "#CFF3CF"), ("color", "#1F5D1F")],
                     }
                 )
             elif col in need_cols:
@@ -1973,6 +2254,14 @@ def main():
             .reset_index()
         )
         grouped = grouped.merge(stock_by_r, on="R코드", how="left")
+        if realtime_ctx is not None and "maps" in realtime_ctx:
+            grouped["사출실적"] = (
+                grouped["R코드"].astype(str).str.strip().map(realtime_ctx["maps"].get("[10]", {})).fillna(0)
+            )
+            grouped["사출필요량"] = pd.to_numeric(
+                grouped["사출필요량"], errors="coerce"
+            ).fillna(0)
+            grouped["사출필요량"] = (grouped["사출필요량"] - grouped["사출실적"]).clip(lower=0)
 
         specs = grouped["R코드"].apply(parse_spec_from_code).apply(pd.Series)
         specs.columns = ["파워", "실린더(ADD)", "축"]
@@ -1988,6 +2277,7 @@ def main():
             "생산필요량",
             "사출창고",
             "사출필요량",
+            "사출실적",
             "출고예상일",
         ]
         keep_cols = [col for col in ordered_cols if col in grouped.columns]
@@ -2089,6 +2379,15 @@ def main():
                 )
 
     with tab_production:
+        if realtime_ctx is not None:
+            if realtime_last_date:
+                st.caption(
+                    f"실시간 재계산 반영일: {realtime_last_date} (상태=확인, 업로드 행수 {realtime_rows:,})"
+                )
+            else:
+                st.caption(
+                    f"실시간 재계산 반영됨 (상태=확인, 업로드 행수 {realtime_rows:,})"
+                )
         color_tab, clear_tab = st.tabs(["Color", "Clear"])
         with color_tab:
             render_category_tabs(filtered_base[color_mask], "Color", "color")
@@ -2541,8 +2840,6 @@ def main():
                 else 0
             )
             month_target_value = month_target_daily * month_workdays_value
-            if selected_date.year == 2026 and selected_date.month == 1:
-                month_target_value = 5_000_000
             month_rate_value = (
                 month_actual_value / month_target_value if month_target_value else 0
             )
@@ -2579,8 +2876,6 @@ def main():
                 else 0
             )
             prev_month_target_value = prev_month_target_daily * prev_month_workdays_value
-            if prev_month_date.year == 2026 and prev_month_date.month == 1:
-                prev_month_target_value = 5_000_000
             prev_month_rate_value = (
                 prev_month_actual_value / prev_month_target_value
                 if prev_month_target_value

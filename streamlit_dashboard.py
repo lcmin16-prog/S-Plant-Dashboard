@@ -574,6 +574,28 @@ def get_latest_actual_date_from_daily_files():
     return latest.strftime("%Y-%m-%d")
 
 
+@st.cache_data(show_spinner=False)
+def get_latest_actual_date_from_goal_summary():
+    path = Path(GOAL_SUMMARY_FILE)
+    if not path.exists():
+        return ""
+    for enc in ("utf-8-sig", "cp949", "euc-kr"):
+        try:
+            df = pd.read_csv(path, encoding=enc, low_memory=False)
+            break
+        except Exception:
+            df = None
+    if df is None or df.empty:
+        return ""
+    df.columns = [str(c).strip() for c in df.columns]
+    if "일자" not in df.columns:
+        return ""
+    dates = pd.to_datetime(df["일자"], errors="coerce")
+    if not dates.notna().any():
+        return ""
+    return dates.max().strftime("%Y-%m-%d")
+
+
 def apply_realtime_actuals_to_aggregated(aggregated, realtime_ctx):
     if not realtime_ctx or "maps_good" not in realtime_ctx or "maps_prod" not in realtime_ctx:
         return aggregated
@@ -1392,8 +1414,9 @@ def main():
     if not data_path.exists():
         st.error(f"파일을 찾을 수 없습니다: {DATA_FILE}")
         return
+    latest_goal_date = get_latest_actual_date_from_goal_summary()
     latest_actual_date = get_latest_actual_date_from_daily_files()
-    dashboard_update_text = latest_actual_date
+    dashboard_update_text = latest_goal_date or latest_actual_date
     try:
         updated_at = datetime.fromtimestamp(data_path.stat().st_mtime)
         if not dashboard_update_text:

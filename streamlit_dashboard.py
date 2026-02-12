@@ -41,13 +41,6 @@ PROCESS_KEYS = list(PROCESS_LABELS.keys())
 WORKDAY_OVERRIDES = {
     (2026, 1): 27,  # Jan 2026 shutdown 3 days
 }
-REALTIME_NEED_COL_MAP = {
-    "사출필요량": "사출실적",
-    "분리필요량": "분리실적",
-    "수화필요량": "수화실적",
-    "접착필요량": "접착실적",
-    "누수/규격필요량": "누수실적",
-}
 
 
 def format_date_series(series):
@@ -255,6 +248,22 @@ def apply_alignment(styler, frame):
         overwrite=False,
     )
     return styler
+
+
+def add_change_marker(display_df, numeric_df, flags_df, cols):
+    out = display_df.copy()
+    for col in cols:
+        if col not in out.columns or col not in numeric_df.columns:
+            continue
+        flag_col = f"__chg__{col}"
+        if flag_col not in flags_df.columns:
+            continue
+        values = pd.to_numeric(numeric_df[col], errors="coerce").fillna(0)
+        marked = values.map(lambda v: f"{v:,.0f}")
+        changed = flags_df[flag_col].reindex(out.index).fillna(False)
+        marked.loc[changed] = marked.loc[changed] + " (*)"
+        out[col] = marked
+    return out
 
 
 def render_dataframe(styled, fallback, **kwargs):
@@ -473,13 +482,20 @@ def parse_realtime_actual_upload(uploaded_file):
     if missing:
         return {"error": f"업로드 파일 필수 컬럼 누락: {', '.join(missing)}"}
 
-    qty_col = None
-    for candidate in ("양품수량", "샘플제외 양품수량", "생산수량"):
+    good_col = None
+    for candidate in ("양품수량", "샘플제외 양품수량"):
         if candidate in actual_df.columns:
-            qty_col = candidate
+            good_col = candidate
             break
-    if qty_col is None:
-        return {"error": "업로드 파일에 수량 컬럼(양품수량/샘플제외 양품수량/생산수량)이 없습니다."}
+    prod_col = "생산수량" if "생산수량" in actual_df.columns else None
+    if good_col is None and prod_col is None:
+        return {
+            "error": "업로드 파일에 수량 컬럼이 없습니다. (양품수량/샘플제외 양품수량/생산수량 필요)"
+        }
+    if good_col is None:
+        good_col = prod_col
+    if prod_col is None:
+        prod_col = good_col
 
     if "상태" in actual_df.columns:
         status_series = actual_df["상태"].astype(str).str.strip()
@@ -487,15 +503,18 @@ def parse_realtime_actual_upload(uploaded_file):
 
     if actual_df.empty:
         return {
-            "maps": {key: {} for key in ("[10]", "[20]", "[45]", "[55]", "[80]")},
+            "maps_good": {key: {} for key in ("[10]", "[20]", "[45]", "[55]", "[80]")},
+            "maps_prod": {key: {} for key in ("[10]", "[20]", "[45]", "[55]", "[80]")},
             "last_date": "",
             "rows": 0,
-            "qty_col": qty_col,
+            "good_col": good_col,
+            "prod_col": prod_col,
         }
 
     actual_df["품목코드"] = actual_df["품목코드"].astype(str).str.strip()
     actual_df["공정코드"] = actual_df["공정코드"].apply(normalize_realtime_process_code)
-    actual_df[qty_col] = pd.to_numeric(actual_df[qty_col], errors="coerce").fillna(0)
+    actual_df[good_col] = pd.to_numeric(actual_df[good_col], errors="coerce").fillna(0)
+    actual_df[prod_col] = pd.to_numeric(actual_df[prod_col], errors="coerce").fillna(0)
     actual_df = actual_df[actual_df["품목코드"] != ""]
     actual_df = actual_df[actual_df["공정코드"].isin(["[10]", "[20]", "[45]", "[55]", "[80]"])]
 
@@ -505,23 +524,24 @@ def parse_realtime_actual_upload(uploaded_file):
         if date_series.notna().any():
             date_text = date_series.max().strftime("%Y-%m-%d")
 
-    maps = {}
+    maps_good = {}
+    maps_prod = {}
     for process in ("[10]", "[20]", "[45]", "[55]", "[80]"):
         subset = actual_df[actual_df["공정코드"] == process]
         if subset.empty:
-            maps[process] = {}
+            maps_good[process] = {}
+            maps_prod[process] = {}
         else:
-            maps[process] = (
-                subset.groupby("품목코드", dropna=False)[qty_col]
-                .sum()
-                .to_dict()
-            )
+            maps_good[process] = subset.groupby("품목코드", dropna=False)[good_col].sum().to_dict()
+            maps_prod[process] = subset.groupby("품목코드", dropna=False)[prod_col].sum().to_dict()
 
     return {
-        "maps": maps,
+        "maps_good": maps_good,
+        "maps_prod": maps_prod,
         "last_date": date_text,
         "rows": int(len(actual_df)),
-        "qty_col": qty_col,
+        "good_col": good_col,
+        "prod_col": prod_col,
     }
 
 
@@ -555,41 +575,78 @@ def get_latest_actual_date_from_daily_files():
 
 
 def apply_realtime_actuals_to_aggregated(aggregated, realtime_ctx):
-    if not realtime_ctx or "maps" not in realtime_ctx:
+    if not realtime_ctx or "maps_good" not in realtime_ctx or "maps_prod" not in realtime_ctx:
         return aggregated
     view = aggregated.copy()
     p_code = view["품목코드"].astype(str).str.strip() if "품목코드" in view.columns else pd.Series([""] * len(view), index=view.index)
     q_code = view["Q코드"].astype(str).str.strip() if "Q코드" in view.columns else pd.Series([""] * len(view), index=view.index)
     r_code = view["R코드"].astype(str).str.strip() if "R코드" in view.columns else pd.Series([""] * len(view), index=view.index)
+    maps_good = realtime_ctx.get("maps_good", {})
+    maps_prod = realtime_ctx.get("maps_prod", {})
 
-    view["사출실적"] = r_code.map(realtime_ctx["maps"].get("[10]", {})).fillna(0)
-    view["분리실적"] = q_code.map(realtime_ctx["maps"].get("[20]", {})).fillna(0)
-    view["수화실적"] = p_code.map(realtime_ctx["maps"].get("[45]", {})).fillna(0)
-    view["접착실적"] = p_code.map(realtime_ctx["maps"].get("[55]", {})).fillna(0)
-    view["누수실적"] = p_code.map(realtime_ctx["maps"].get("[80]", {})).fillna(0)
+    r_good_10 = r_code.map(maps_good.get("[10]", {})).fillna(0)
+    q_good_20 = q_code.map(maps_good.get("[20]", {})).fillna(0)
+    q_prod_20 = q_code.map(maps_prod.get("[20]", {})).fillna(0)
+    p_good_45 = p_code.map(maps_good.get("[45]", {})).fillna(0)
+    p_prod_45 = p_code.map(maps_prod.get("[45]", {})).fillna(0)
+    p_good_55 = p_code.map(maps_good.get("[55]", {})).fillna(0)
+    p_prod_55 = p_code.map(maps_prod.get("[55]", {})).fillna(0)
+    p_good_80 = p_code.map(maps_good.get("[80]", {})).fillna(0)
+    p_prod_80 = p_code.map(maps_prod.get("[80]", {})).fillna(0)
 
-    for need_col, actual_col in REALTIME_NEED_COL_MAP.items():
-        if need_col in view.columns:
-            view[need_col] = pd.to_numeric(view[need_col], errors="coerce").fillna(0)
-            view[need_col] = (view[need_col] - view[actual_col]).clip(lower=0)
+    stock_cols = ["사출창고", "분리창고", "검사접착", "누수규격", "완제품"]
+    need_cols = ["생산필요량", "사출필요량", "분리필요량", "수화필요량", "접착필요량", "누수/규격필요량"]
+    tracked_cols = [col for col in stock_cols + need_cols if col in view.columns]
+    original = {}
+    for col in tracked_cols:
+        view[col] = pd.to_numeric(view[col], errors="coerce").fillna(0)
+        original[col] = view[col].copy()
 
+    if "사출창고" in view.columns:
+        view["사출창고"] = (view["사출창고"] + r_good_10 - q_prod_20).clip(lower=0)
+    if "분리창고" in view.columns:
+        view["분리창고"] = (view["분리창고"] + q_good_20 - p_prod_45).clip(lower=0)
+    if "검사접착" in view.columns:
+        view["검사접착"] = (view["검사접착"] + p_good_45 - p_prod_55).clip(lower=0)
+    if "누수규격" in view.columns:
+        view["누수규격"] = (view["누수규격"] + p_good_55 - p_prod_80).clip(lower=0)
+    if "완제품" in view.columns:
+        view["완제품"] = (view["완제품"] + p_good_80).clip(lower=0)
+
+    if "사출필요량" in view.columns:
+        view["사출필요량"] = (view["사출필요량"] - r_good_10).clip(lower=0)
+    if "분리필요량" in view.columns:
+        view["분리필요량"] = (view["분리필요량"] - q_good_20).clip(lower=0)
+    if "수화필요량" in view.columns:
+        view["수화필요량"] = (view["수화필요량"] - p_good_45).clip(lower=0)
+    if "접착필요량" in view.columns:
+        view["접착필요량"] = (view["접착필요량"] - p_good_55).clip(lower=0)
+    if "누수/규격필요량" in view.columns:
+        view["누수/규격필요량"] = (view["누수/규격필요량"] - p_good_80).clip(lower=0)
     if "생산필요량" in view.columns:
-        view["생산필요량"] = pd.to_numeric(view["생산필요량"], errors="coerce").fillna(0)
-        view["생산필요량"] = (view["생산필요량"] - view["누수실적"]).clip(lower=0)
+        view["생산필요량"] = (view["생산필요량"] - p_good_80).clip(lower=0)
+
+    for col in tracked_cols:
+        view[f"__chg__{col}"] = view[col].round(6).ne(original[col].round(6))
 
     return view
 
 
 def apply_realtime_actuals_to_injection(grouped, realtime_ctx):
-    if not realtime_ctx or "maps" not in realtime_ctx:
+    if not realtime_ctx or "maps_good" not in realtime_ctx:
         return grouped
     view = grouped.copy()
-    view["사출실적"] = (
-        view["R코드"].astype(str).str.strip().map(realtime_ctx["maps"].get("[10]", {})).fillna(0)
-    )
+    r_good_10 = view["R코드"].astype(str).str.strip().map(realtime_ctx["maps_good"].get("[10]", {})).fillna(0)
+    if "사출창고" in view.columns:
+        view["사출창고"] = pd.to_numeric(view["사출창고"], errors="coerce").fillna(0)
+        original_stock = view["사출창고"].copy()
+        view["사출창고"] = (view["사출창고"] + r_good_10).clip(lower=0)
+        view["__chg__사출창고"] = view["사출창고"].round(6).ne(original_stock.round(6))
     if "사출필요량" in view.columns:
         view["사출필요량"] = pd.to_numeric(view["사출필요량"], errors="coerce").fillna(0)
-        view["사출필요량"] = (view["사출필요량"] - view["사출실적"]).clip(lower=0)
+        original_need = view["사출필요량"].copy()
+        view["사출필요량"] = (view["사출필요량"] - r_good_10).clip(lower=0)
+        view["__chg__사출필요량"] = view["사출필요량"].round(6).ne(original_need.round(6))
     return view
 
 
@@ -1406,7 +1463,8 @@ def main():
     realtime_last_date = ""
     realtime_error = ""
     realtime_rows = 0
-    realtime_qty_col = ""
+    realtime_good_col = ""
+    realtime_prod_col = ""
 
     with st.sidebar:
         st.header("필터")
@@ -1438,16 +1496,17 @@ def main():
                 realtime_ctx = realtime_result
                 realtime_last_date = str(realtime_result.get("last_date", "")).strip()
                 realtime_rows = int(realtime_result.get("rows", 0))
-                realtime_qty_col = str(realtime_result.get("qty_col", "")).strip()
+                realtime_good_col = str(realtime_result.get("good_col", "")).strip()
+                realtime_prod_col = str(realtime_result.get("prod_col", "")).strip()
         if realtime_error:
             st.error(realtime_error)
         elif realtime_ctx is not None:
             if realtime_last_date:
                 st.success(
-                    f"업로드 반영 완료: {realtime_last_date} 기준 / {realtime_rows:,}행 / {realtime_qty_col}"
+                    f"업로드 반영 완료: {realtime_last_date} 기준 / {realtime_rows:,}행 / 양품:{realtime_good_col}, 생산:{realtime_prod_col}"
                 )
             else:
-                st.success(f"업로드 반영 완료: {realtime_rows:,}행 / {realtime_qty_col}")
+                st.success(f"업로드 반영 완료: {realtime_rows:,}행 / 양품:{realtime_good_col}, 생산:{realtime_prod_col}")
         st.markdown("---")
         st.checkbox(
             "빠른 로딩(서식 최소화)",
@@ -1960,7 +2019,6 @@ def main():
             "불용재고",
         ]
         need_cols = ["사출필요량", "분리필요량", "수화필요량", "접착필요량", "누수/규격필요량"]
-        actual_cols = ["사출실적", "분리실적", "수화실적", "접착실적", "누수실적"]
         columns = ["품명", "생산품명(P코드)", "생산품명(Q코드)", "신규분류코드"]
         if show_codes:
             columns.extend(["품목코드", "Q코드", "R코드"])
@@ -1969,10 +2027,14 @@ def main():
         )
         columns.extend([col for col in stock_cols if col in aggregated.columns])
         columns.extend([col for col in need_cols if col in aggregated.columns])
-        columns.extend([col for col in actual_cols if col in aggregated.columns])
         available = [col for col in columns if col in aggregated.columns]
         extra_cols = ["_sort_date"] if "_sort_date" in aggregated.columns else []
-        view = aggregated[available + extra_cols].copy()
+        flag_cols = [
+            col
+            for col in aggregated.columns
+            if str(col).startswith("__chg__")
+        ]
+        view = aggregated[available + extra_cols + flag_cols].copy()
 
         if sort_by_ship and "_sort_date" in view.columns:
             view = view.sort_values(by="_sort_date", ascending=True)
@@ -1997,18 +2059,32 @@ def main():
             )
             view = view[mask]
 
+        flag_cols_present = [col for col in view.columns if str(col).startswith("__chg__")]
+        flags_source = (
+            view[flag_cols_present].copy()
+            if flag_cols_present
+            else pd.DataFrame(index=view.index)
+        )
+        view = view.drop(columns=flag_cols_present, errors="ignore")
+        numeric_view = view.copy()
         view = fill_object_na(view)
+        marker_cols = [col for col in (["생산필요량"] + stock_cols + need_cols) if col in view.columns]
+        if realtime_ctx is not None:
+            changed_cols = [col for col in marker_cols if f"__chg__{col}" in flags_source.columns]
+            if changed_cols:
+                view = add_change_marker(view, numeric_view, flags_source, changed_cols)
+
         top_labels = []
         for col in view.columns:
             if col in stock_cols:
                 top_labels.append("재고현황")
-            elif col in actual_cols:
-                top_labels.append("생산실적")
             elif col in need_cols:
                 top_labels.append("생산필요량")
             else:
                 top_labels.append("")
-        view.columns = pd.MultiIndex.from_arrays([top_labels, view.columns])
+        multi_cols = pd.MultiIndex.from_arrays([top_labels, view.columns])
+        view.columns = multi_cols
+        numeric_view.columns = multi_cols
 
         def border_styles(data):
             styles = pd.DataFrame("", index=data.index, columns=data.columns)
@@ -2018,8 +2094,6 @@ def main():
 
             stock_first = ("재고현황", stock_cols[0]) if stock_cols else None
             stock_last = ("재고현황", stock_cols[-1]) if stock_cols else None
-            actual_first = ("생산실적", actual_cols[0]) if actual_cols else None
-            actual_last = ("생산실적", actual_cols[-1]) if actual_cols else None
             need_first = ("생산필요량", need_cols[0]) if need_cols else None
             need_last = ("생산필요량", need_cols[-1]) if need_cols else None
             if stock_first and stock_first in styles.columns:
@@ -2029,14 +2103,6 @@ def main():
             if stock_last and stock_last in styles.columns:
                 styles.loc[:, stock_last] = append_style(
                     styles.loc[:, stock_last], "border-right: 2px solid #777"
-                )
-            if actual_first and actual_first in styles.columns:
-                styles.loc[:, actual_first] = append_style(
-                    styles.loc[:, actual_first], "border-left: 2px solid #777"
-                )
-            if actual_last and actual_last in styles.columns:
-                styles.loc[:, actual_last] = append_style(
-                    styles.loc[:, actual_last], "border-right: 2px solid #777"
                 )
             if need_first and need_first in styles.columns:
                 styles.loc[:, need_first] = append_style(
@@ -2051,12 +2117,6 @@ def main():
                 if key in styles.columns:
                     styles.loc[:, key] = append_style(
                         styles.loc[:, key], "background-color: #EAF2FF"
-                    )
-            for col in actual_cols:
-                key = ("생산실적", col)
-                if key in styles.columns:
-                    styles.loc[:, key] = append_style(
-                        styles.loc[:, key], "background-color: #E8F9E8"
                     )
             for col in need_cols:
                 key = ("생산필요량", col)
@@ -2092,25 +2152,11 @@ def main():
                         "props": [("background-color", "#FFBE8C"), ("color", "#8A3B00")],
                     }
                 )
-            elif group == "생산실적":
-                header_styles.append(
-                    {
-                        "selector": f"th.col_heading.level0.col{idx}",
-                        "props": [("background-color", "#A4E8A4"), ("color", "#1F5D1F")],
-                    }
-                )
             if col in stock_cols:
                 header_styles.append(
                     {
                         "selector": f"th.col_heading.level1.col{idx}",
                         "props": [("background-color", "#C7DCFF"), ("color", "#0B3B8C")],
-                    }
-                )
-            elif col in actual_cols:
-                header_styles.append(
-                    {
-                        "selector": f"th.col_heading.level1.col{idx}",
-                        "props": [("background-color", "#CFF3CF"), ("color", "#1F5D1F")],
                     }
                 )
             elif col in need_cols:
@@ -2194,7 +2240,7 @@ def main():
             .apply(border_styles, axis=None)
             .apply(highlight_warning, axis=None)
             .set_table_styles(header_styles),
-            view,
+            numeric_view,
         )
         selection = render_dataframe(
             styled,
@@ -2206,7 +2252,7 @@ def main():
             key=f"prod_table_{key_suffix}",
         )
         if selection is not None:
-            render_selection_sum(view, selection.selection.rows, "선택 합계")
+            render_selection_sum(numeric_view, selection.selection.rows, "선택 합계")
 
     def render_injection_summary(view_df, title):
         st.markdown(f"**{title}**")
@@ -2254,14 +2300,8 @@ def main():
             .reset_index()
         )
         grouped = grouped.merge(stock_by_r, on="R코드", how="left")
-        if realtime_ctx is not None and "maps" in realtime_ctx:
-            grouped["사출실적"] = (
-                grouped["R코드"].astype(str).str.strip().map(realtime_ctx["maps"].get("[10]", {})).fillna(0)
-            )
-            grouped["사출필요량"] = pd.to_numeric(
-                grouped["사출필요량"], errors="coerce"
-            ).fillna(0)
-            grouped["사출필요량"] = (grouped["사출필요량"] - grouped["사출실적"]).clip(lower=0)
+        if realtime_ctx is not None:
+            grouped = apply_realtime_actuals_to_injection(grouped, realtime_ctx)
 
         specs = grouped["R코드"].apply(parse_spec_from_code).apply(pd.Series)
         specs.columns = ["파워", "실린더(ADD)", "축"]
@@ -2277,10 +2317,11 @@ def main():
             "생산필요량",
             "사출창고",
             "사출필요량",
-            "사출실적",
             "출고예상일",
         ]
         keep_cols = [col for col in ordered_cols if col in grouped.columns]
+        flag_cols = [col for col in grouped.columns if str(col).startswith("__chg__")]
+        keep_cols.extend([col for col in flag_cols if col not in keep_cols])
         if "_sort_date" in grouped.columns:
             keep_cols.append("_sort_date")
         grouped = grouped[keep_cols]
@@ -2291,6 +2332,14 @@ def main():
             overdue_mask = overdue_mask.reindex(grouped.index, fill_value=False)
         if soon_mask is not None:
             soon_mask = soon_mask.reindex(grouped.index, fill_value=False)
+
+        flag_cols_present = [col for col in grouped.columns if str(col).startswith("__chg__")]
+        flags_source = (
+            grouped[flag_cols_present].copy()
+            if flag_cols_present
+            else pd.DataFrame(index=grouped.index)
+        )
+        grouped = grouped.drop(columns=flag_cols_present, errors="ignore")
 
         def highlight_injection(data):
             styles = pd.DataFrame("", index=data.index, columns=data.columns)
@@ -2310,6 +2359,12 @@ def main():
                         styles.loc[idx, "출고예상일"] = "color: #B7791F; font-weight: 700;"
             return styles
 
+        numeric_grouped = grouped.copy()
+        if realtime_ctx is not None:
+            changed_cols = [col for col in ("사출창고", "사출필요량") if f"__chg__{col}" in flags_source.columns]
+            if changed_cols:
+                grouped = add_change_marker(grouped, numeric_grouped, flags_source, changed_cols)
+
         format_dict = {}
         for col in grouped.columns:
             if not pd.api.types.is_numeric_dtype(grouped[col]):
@@ -2322,7 +2377,7 @@ def main():
             grouped.style.format(format_dict, na_rep="").apply(
                 highlight_injection, axis=None
             ),
-            grouped,
+            numeric_grouped,
         )
         selection = render_dataframe(
             styled,
@@ -2334,7 +2389,7 @@ def main():
             key=f"injection_table_{title}",
         )
         if selection is not None:
-            render_selection_sum(grouped, selection.selection.rows, "선택 합계")
+            render_selection_sum(numeric_grouped, selection.selection.rows, "선택 합계")
 
     has_category = "신규분류코드" in filtered_base.columns
     color_mask = (

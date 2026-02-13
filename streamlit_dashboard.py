@@ -250,22 +250,6 @@ def apply_alignment(styler, frame):
     return styler
 
 
-def add_change_marker(display_df, numeric_df, flags_df, cols):
-    out = display_df.copy()
-    for col in cols:
-        if col not in out.columns or col not in numeric_df.columns:
-            continue
-        flag_col = f"__chg__{col}"
-        if flag_col not in flags_df.columns:
-            continue
-        values = pd.to_numeric(numeric_df[col], errors="coerce").fillna(0)
-        marked = values.map(lambda v: f"{v:,.0f}")
-        changed = flags_df[flag_col].reindex(out.index).fillna(False)
-        marked.loc[changed] = marked.loc[changed] + " (*)"
-        out[col] = marked
-    return out
-
-
 def render_dataframe(styled, fallback, **kwargs):
     fast_mode = st.session_state.get(FAST_MODE_KEY, False)
     if fast_mode:
@@ -276,6 +260,30 @@ def render_dataframe(styled, fallback, **kwargs):
         return st.dataframe(styled, **kwargs)
     except StreamlitAPIException:
         return st.dataframe(fallback, **kwargs)
+
+
+def flatten_export_columns(frame):
+    df = frame.copy()
+    if isinstance(df.columns, pd.MultiIndex):
+        flattened = []
+        for col in df.columns:
+            if not isinstance(col, tuple):
+                flattened.append(str(col))
+                continue
+            top, sub = col
+            top_txt = clean_text(top)
+            sub_txt = clean_text(sub)
+            if top_txt and sub_txt:
+                flattened.append(f"{top_txt}_{sub_txt}")
+            else:
+                flattened.append(sub_txt or top_txt)
+        df.columns = flattened
+    return df
+
+
+def to_csv_bytes(frame):
+    export_df = flatten_export_columns(frame)
+    return export_df.to_csv(index=False).encode("utf-8-sig")
 
 
 def calc_table_height(
@@ -926,6 +934,9 @@ def preprocess_actuals(actuals):
     df = actuals.copy()
     df["공장"] = df["공장"].astype(str).str.strip()
     df = df[df["공장"] == "S관(3공장)"]
+    if "상태" in df.columns:
+        status_series = df["상태"].astype(str).str.strip()
+        df = df[status_series == "확인"].copy()
     df["공정코드"] = df["공정코드"].apply(normalize_process_code)
     df = df[df["공정코드"].isin(PROCESS_KEYS)]
     df["생산일자"] = pd.to_datetime(df["생산일자"], errors="coerce")
@@ -1062,6 +1073,9 @@ def preprocess_actuals_daily(actuals):
     df = actuals.copy()
     df["공장"] = df["공장"].astype(str).str.strip()
     df = df[df["공장"] == "S관(3공장)"]
+    if "상태" in df.columns:
+        status_series = df["상태"].astype(str).str.strip()
+        df = df[status_series == "확인"].copy()
     df["공정코드"] = df["공정코드"].apply(normalize_process_code)
     df = df[df["공정코드"].isin(PROCESS_KEYS)]
     df["생산일자"] = pd.to_datetime(df["생산일자"], errors="coerce")
@@ -1594,7 +1608,7 @@ def main():
                 filtered[search_cols]
                 .astype(str)
                 .apply(
-                    lambda row: row.str.contains(search_keyword, case=False, na=False).any(),
+                    lambda row: row.str.contains(search_keyword, case=False, na=False, regex=False).any(),
                     axis=1,
                 )
             )
@@ -1834,6 +1848,11 @@ def main():
             )
 
         st.subheader("상세 목록")
+        show_detail_codes = st.checkbox(
+            "코드 컬럼 보기 (판매코드, 품목코드, Q코드, R코드)",
+            value=False,
+            key="show_codes_detail",
+        )
         hide_columns = {
             "잔여수량",
             "사출창고",
@@ -1846,9 +1865,94 @@ def main():
             "접착필요량",
             "누수/규격필요량",
         }
+        if not show_detail_codes:
+            hide_columns.update({"판매코드", "품목코드", "Q코드", "R코드"})
         detail_cols = [col for col in filtered.columns if col not in hide_columns]
         search_text = st.text_input("상세 목록 검색", value="", placeholder="검색어 입력")
         detail_df = filtered[detail_cols].copy()
+        if "수주번호" in detail_df.columns:
+            order_id = detail_df["수주번호"].astype(str).str.strip()
+            detail_df["수주번호"] = order_id.where(
+                ~order_id.str.startswith("예외"),
+                "예외수주",
+            )
+
+        (
+            p_name_exact_detail,
+            q_name_exact_detail,
+            _r_name_exact_detail,
+            p_name_candidates_detail,
+            q_name_candidates_detail,
+            _r_name_candidates_detail,
+            _sale_name_exact_detail,
+            _sale_name_candidates_detail,
+            _category_by_p_prefix_detail,
+        ) = build_code_name_lookup()
+        if "생산품명" in detail_df.columns:
+            empty_name = detail_df["생산품명"].apply(clean_text) == ""
+            if "품목코드" in detail_df.columns:
+                p_fallback = detail_df["품목코드"].apply(
+                    lambda code: resolve_code_name(
+                        code, p_name_exact_detail, p_name_candidates_detail
+                    )
+                )
+                detail_df["생산품명"] = detail_df["생산품명"].where(
+                    ~empty_name, p_fallback
+                )
+                empty_name = detail_df["생산품명"].apply(clean_text) == ""
+            if "Q코드" in detail_df.columns:
+                q_fallback = detail_df["Q코드"].apply(
+                    lambda code: resolve_code_name(
+                        code, q_name_exact_detail, q_name_candidates_detail
+                    )
+                )
+                detail_df["생산품명"] = detail_df["생산품명"].where(
+                    ~empty_name, q_fallback
+                )
+
+        need_status_cols = [
+            "사출필요량",
+            "분리필요량",
+            "수화필요량",
+            "접착필요량",
+            "누수/규격필요량",
+            "생산필요량",
+            "잔여수주량",
+        ]
+        status_numeric = {}
+        for col in need_status_cols:
+            if col in filtered.columns:
+                status_numeric[col] = pd.to_numeric(
+                    filtered[col].astype(str).str.replace(",", ""), errors="coerce"
+                ).fillna(0)
+            else:
+                status_numeric[col] = pd.Series([0] * len(filtered), index=filtered.index)
+
+        def compute_progress_status(idx):
+            if status_numeric["사출필요량"].loc[idx] > 0:
+                return "사출중"
+            if status_numeric["분리필요량"].loc[idx] > 0:
+                return "분리중"
+            if status_numeric["수화필요량"].loc[idx] > 0:
+                return "수화/검사중"
+            if status_numeric["접착필요량"].loc[idx] > 0:
+                return "접착중"
+            if status_numeric["누수/규격필요량"].loc[idx] > 0:
+                return "누수/규격중"
+            if status_numeric["생산필요량"].loc[idx] > 0:
+                return "생산대기"
+            if status_numeric["잔여수주량"].loc[idx] > 0:
+                return "포장/출고"
+            return "완료"
+
+        detail_df["진행현황"] = detail_df.index.to_series().apply(compute_progress_status)
+        if "출고예상일" in detail_df.columns:
+            cols = detail_df.columns.tolist()
+            cols.remove("진행현황")
+            ship_idx = cols.index("출고예상일")
+            cols.insert(ship_idx + 1, "진행현황")
+            detail_df = detail_df[cols]
+
         if "수량" in detail_df.columns and "잔여수량" in detail_df.columns:
             cols = detail_df.columns.tolist()
             cols.remove("수량")
@@ -1893,7 +1997,7 @@ def main():
         detail_df = fill_object_na(detail_df)
         if search_text.strip():
             mask = detail_df.astype(str).apply(
-                lambda row: row.str.contains(search_text, case=False, na=False).any(),
+                lambda row: row.str.contains(search_text, case=False, na=False, regex=False).any(),
                 axis=1,
             )
             detail_df = detail_df[mask]
@@ -2077,7 +2181,7 @@ def main():
         )
         if search_text.strip():
             mask = view.astype(str).apply(
-                lambda row: row.str.contains(search_text, case=False, na=False).any(),
+                lambda row: row.str.contains(search_text, case=False, na=False, regex=False).any(),
                 axis=1,
             )
             view = view[mask]
@@ -2091,12 +2195,6 @@ def main():
         view = view.drop(columns=flag_cols_present, errors="ignore")
         numeric_view = view.copy()
         view = fill_object_na(view)
-        marker_cols = [col for col in (["생산필요량"] + stock_cols + need_cols) if col in view.columns]
-        if realtime_ctx is not None:
-            changed_cols = [col for col in marker_cols if f"__chg__{col}" in flags_source.columns]
-            if changed_cols:
-                view = add_change_marker(view, numeric_view, flags_source, changed_cols)
-
         top_labels = []
         for col in view.columns:
             if col in stock_cols:
@@ -2248,9 +2346,29 @@ def main():
                     styles.loc[idx, due_key] = "color: #B7791F; font-weight: 700;"
             return styles
 
+        def highlight_changed(data):
+            styles = pd.DataFrame("", index=data.index, columns=data.columns)
+            if realtime_ctx is None or flags_source.empty:
+                return styles
+            for base_col in ["생산필요량"] + stock_cols + need_cols:
+                flag_col = f"__chg__{base_col}"
+                if flag_col not in flags_source.columns:
+                    continue
+                if base_col in stock_cols:
+                    col_key = ("재고현황", base_col)
+                elif base_col in need_cols:
+                    col_key = ("생산필요량", base_col)
+                else:
+                    col_key = ("", base_col)
+                if col_key not in styles.columns:
+                    continue
+                changed = flags_source[flag_col].reindex(data.index).fillna(False)
+                styles.loc[changed, col_key] = "color: #0B3B8C; font-weight: 700;"
+            return styles
+
         format_dict = {}
-        for col in view.columns:
-            series = view[col]
+        for col in numeric_view.columns:
+            series = numeric_view[col]
             if not pd.api.types.is_numeric_dtype(series):
                 continue
             name = col[1] if isinstance(col, tuple) else col
@@ -2258,16 +2376,18 @@ def main():
                 format_dict[col] = "{:,.2f}"
             else:
                 format_dict[col] = "{:,.0f}"
+        display_view = view
         styled = apply_alignment(
-            view.style.format(format_dict, na_rep="")
+            display_view.style.format(format_dict, na_rep="")
             .apply(border_styles, axis=None)
             .apply(highlight_warning, axis=None)
+            .apply(highlight_changed, axis=None)
             .set_table_styles(header_styles),
             numeric_view,
         )
         selection = render_dataframe(
             styled,
-            view,
+            display_view,
             width="stretch",
             height=calc_table_height(len(view)),
             on_select="rerun",
@@ -2383,28 +2503,37 @@ def main():
             return styles
 
         numeric_grouped = grouped.copy()
-        if realtime_ctx is not None:
-            changed_cols = [col for col in ("사출창고", "사출필요량") if f"__chg__{col}" in flags_source.columns]
-            if changed_cols:
-                grouped = add_change_marker(grouped, numeric_grouped, flags_source, changed_cols)
+
+        def highlight_injection_changed(data):
+            styles = pd.DataFrame("", index=data.index, columns=data.columns)
+            if realtime_ctx is None or flags_source.empty:
+                return styles
+            for col in ("사출창고", "사출필요량", "생산필요량"):
+                flag_col = f"__chg__{col}"
+                if col not in styles.columns or flag_col not in flags_source.columns:
+                    continue
+                changed = flags_source[flag_col].reindex(data.index).fillna(False)
+                styles.loc[changed, col] = "color: #0B3B8C; font-weight: 700;"
+            return styles
 
         format_dict = {}
-        for col in grouped.columns:
-            if not pd.api.types.is_numeric_dtype(grouped[col]):
+        for col in numeric_grouped.columns:
+            if not pd.api.types.is_numeric_dtype(numeric_grouped[col]):
                 continue
             if "단가" in col or "율" in col or "비율" in col:
                 format_dict[col] = "{:,.2f}"
             else:
                 format_dict[col] = "{:,.0f}"
+        display_grouped = grouped
         styled = apply_alignment(
-            grouped.style.format(format_dict, na_rep="").apply(
+            display_grouped.style.format(format_dict, na_rep="").apply(
                 highlight_injection, axis=None
-            ),
+            ).apply(highlight_injection_changed, axis=None),
             numeric_grouped,
         )
         selection = render_dataframe(
             styled,
-            grouped,
+            display_grouped,
             width="stretch",
             height=calc_table_height(len(grouped)),
             on_select="rerun",
@@ -2550,7 +2679,7 @@ def main():
                         pivoted[search_cols]
                         .astype(str)
                         .apply(
-                            lambda row: row.str.contains(search_text, case=False, na=False).any(),
+                            lambda row: row.str.contains(search_text, case=False, na=False, regex=False).any(),
                             axis=1,
                         )
                     )
@@ -4201,4 +4330,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

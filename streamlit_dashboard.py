@@ -251,6 +251,23 @@ def apply_alignment(styler, frame):
 
 
 def render_dataframe(styled, fallback, **kwargs):
+    download_name = kwargs.pop("download_name", None)
+    table_key = kwargs.get("key", "table")
+    if isinstance(fallback, pd.DataFrame) and download_name:
+        try:
+            export_df = flatten_export_columns(fallback)
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                export_df.to_excel(writer, index=False, sheet_name="data")
+            st.download_button(
+                "엑셀 다운로드",
+                data=output.getvalue(),
+                file_name=download_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"{table_key}_xlsx",
+            )
+        except Exception:
+            pass
     fast_mode = st.session_state.get(FAST_MODE_KEY, False)
     if fast_mode:
         return st.dataframe(fallback, **kwargs)
@@ -2037,6 +2054,7 @@ def main():
         selection = render_dataframe(
             styled,
             detail_df,
+            download_name="상세목록.xlsx",
             width="stretch",
             height=calc_table_height(len(detail_df)),
             on_select="rerun",
@@ -2388,6 +2406,7 @@ def main():
         selection = render_dataframe(
             styled,
             display_view,
+            download_name=f"생산계획_{key_suffix}.xlsx",
             width="stretch",
             height=calc_table_height(len(view)),
             on_select="rerun",
@@ -2534,6 +2553,7 @@ def main():
         selection = render_dataframe(
             styled,
             display_grouped,
+            download_name=f"사출코드_{title}.xlsx",
             width="stretch",
             height=calc_table_height(len(grouped)),
             on_select="rerun",
@@ -2712,6 +2732,7 @@ def main():
                 selection = render_dataframe(
                     styled,
                     view,
+                    download_name="재고현황.xlsx",
                     width="stretch",
                     height=calc_table_height(len(view), max_height=650),
                     on_select="rerun",

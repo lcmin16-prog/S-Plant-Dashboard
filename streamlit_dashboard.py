@@ -17,6 +17,8 @@ WORKDAYS_FILE = "근무일수(기준자료).csv"
 TARGET_FILE = "월별업데이트_생산목표량.csv"
 GOAL_SUMMARY_FILE = "깃허브_S관공장목표현황_요약.csv"
 PACKAGING_SUMMARY_FILE = "깃허브_미셀리아_틱톡_포장요약.csv"
+GITHUB_PROD_ACTUALS_FILE = "깃허브_생산실적_요약.csv"
+GITHUB_PACK_ACTUALS_FILE = "깃허브_포장실적_요약.csv"
 PRODUCT_NAME_FILE = "생산품명_집계.csv"
 BOM_MASTER_FILE = "BOM현황(전체).csv"
 FAST_MODE_KEY = "fast_mode"
@@ -782,6 +784,10 @@ def load_packaging_summary():
 @st.cache_data(show_spinner=False)
 def load_daily_production_actuals():
     files = sorted(Path(".").glob("일별업데이트_생산실적현황*.csv"))
+    if not files:
+        fallback = Path(GITHUB_PROD_ACTUALS_FILE)
+        if fallback.exists():
+            files = [fallback]
     cols = ["생산일자", "공정코드", "품목코드", "품명", "양품수량", "생산수량", "상태"]
     if not files:
         return pd.DataFrame(columns=cols)
@@ -824,6 +830,10 @@ def load_daily_production_actuals():
 @st.cache_data(show_spinner=False)
 def load_daily_packaging_actuals():
     files = sorted(Path(".").glob("일별업데이트_포장실적*.csv"))
+    if not files:
+        fallback = Path(GITHUB_PACK_ACTUALS_FILE)
+        if fallback.exists():
+            files = [fallback]
     cols = [
         "생산일자",
         "판매코드",
@@ -1391,6 +1401,90 @@ def build_excel_report(title, report_date, created_at, summary_df, table_df):
         return None, str(exc)
     output.seek(0)
     return output, None
+
+
+def build_color5_insights(process_df, order_df, pack_df):
+    lines = []
+    try:
+        if not process_df.empty and "잔여생산필요량" in process_df.columns:
+            proc = process_df.sort_values("잔여생산필요량", ascending=False).iloc[0]
+            lines.append(
+                f"병목공정: {proc.get('공정', '-')}, 잔여생산필요량 {int(round(float(proc.get('잔여생산필요량', 0)))):,}"
+            )
+    except Exception:
+        pass
+    try:
+        if not order_df.empty and "생산필요량" in order_df.columns:
+            pending = order_df[pd.to_numeric(order_df["생산필요량"], errors="coerce").fillna(0) > 0]
+            if not pending.empty:
+                top = pending.sort_values("생산필요량", ascending=False).head(3)
+                items = [
+                    f"{str(r.get('이니셜', '-'))}/{str(r.get('포장유형', '-'))}:{int(round(float(r.get('생산필요량', 0)))):,}"
+                    for _, r in top.iterrows()
+                ]
+                lines.append("잔여생산 상위: " + ", ".join(items))
+    except Exception:
+        pass
+    try:
+        if not pack_df.empty and {"연관포장수량", "포장수량"}.issubset(set(pack_df.columns)):
+            linked = float(pd.to_numeric(pack_df["연관포장수량"], errors="coerce").fillna(0).sum())
+            total = float(pd.to_numeric(pack_df["포장수량"], errors="coerce").fillna(0).sum())
+            ratio = (linked / total * 100) if total > 0 else 0.0
+            lines.append(f"포장 정합률: {ratio:.2f}% (연관 {linked:,.0f} / 전체 {total:,.0f})")
+    except Exception:
+        pass
+    if not lines:
+        lines.append("자동 인사이트를 생성할 데이터가 부족합니다.")
+    return lines
+
+
+def build_color5_full_report(
+    title,
+    report_date,
+    summary_df,
+    insights,
+    process_df,
+    order_df,
+    pack_df,
+    year_df,
+    month_df,
+    detail_df,
+):
+    from io import BytesIO
+
+    output = BytesIO()
+    try:
+        import openpyxl  # noqa: F401
+    except Exception:
+        return None, "openpyxl not available"
+
+    try:
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            summary_df.to_excel(writer, sheet_name="요약", index=False, startrow=3)
+            insight_df = pd.DataFrame({"자동 인사이트": insights})
+            insight_df.to_excel(
+                writer, sheet_name="요약", index=False, startrow=6 + len(summary_df)
+            )
+            ws = writer.sheets["요약"]
+            ws["A1"] = title
+            ws["A2"] = f"보고일자: {report_date}"
+
+            sheet_map = [
+                ("공정진행", process_df),
+                ("수주요약", order_df),
+                ("포장현황", pack_df),
+                ("연도생산", year_df),
+                ("월별생산", month_df),
+                ("상세리스트", detail_df),
+            ]
+            for name, frame in sheet_map:
+                export_df = flatten_export_columns(frame) if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+                export_df.to_excel(writer, sheet_name=name, index=False)
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
+    output.seek(0)
+    return output, None
+
 
 def compute_monthly_kpis(
     actuals_df,
@@ -4162,6 +4256,17 @@ def main():
             except Exception:
                 return "0.00"
 
+        def calc_progress_ratio_340(need_value, qty_value):
+            try:
+                need = float(need_value)
+                qty = float(qty_value)
+            except Exception:
+                return 0.0
+            if qty <= 0:
+                return 0.0
+            ratio = (1 - (need / qty)) * 100
+            return max(0.0, min(100.0, ratio))
+
         def color_group_340(item_code, name_text=""):
             name = str(name_text).lower()
             if "blending rose" in name:
@@ -4327,6 +4432,12 @@ def main():
             overall_ratio = (
                 (1 - (total_need / total_order_qty)) * 100 if total_order_qty > 0 else 0
             )
+            progress_df = pd.DataFrame()
+            order_summary = pd.DataFrame()
+            pack_status = pd.DataFrame()
+            year_df = pd.DataFrame()
+            month_df = pd.DataFrame()
+            detail_report_df = pd.DataFrame()
 
             kpi = st.columns(5)
             kpi[0].metric("수주수량 합계", fmt_int_340(total_order_qty))
@@ -4418,13 +4529,22 @@ def main():
                     )
                     need_col = get_process_need_col(fifo_for_process, process_code)
                     remain_need = get_process_need_sum(fifo_for_process, process_code)
+                    process_qty = float(pd.to_numeric(fifo_for_process.get("수량", 0), errors="coerce").fillna(0).sum())
                     if need_col and need_col in fifo_for_process.columns:
+                        need_series = pd.to_numeric(
+                            fifo_for_process[need_col], errors="coerce"
+                        ).fillna(0)
+                        process_qty = float(
+                            pd.to_numeric(
+                                fifo_for_process.loc[need_series > 0, "수량"],
+                                errors="coerce",
+                            )
+                            .fillna(0)
+                            .sum()
+                        )
                         initials_count = (
                             fifo_for_process.loc[
-                                pd.to_numeric(
-                                    fifo_for_process[need_col], errors="coerce"
-                                ).fillna(0)
-                                > 0,
+                                need_series > 0,
                                 "이니셜",
                             ]
                             .astype(str)
@@ -4433,15 +4553,12 @@ def main():
                         )
                     else:
                         initials_count = 0
-                    progress_ratio = (
-                        (done_total / (done_total + remain_need)) * 100
-                        if (done_total + remain_need) > 0
-                        else 0
-                    )
+                    progress_ratio = calc_progress_ratio_340(remain_need, process_qty)
                     row = {
                         "공정코드": process_code,
                         "공정": process_name,
                         "2026 생산누계": done_total,
+                        "수주수량": process_qty,
                         "이니셜수": initials_count,
                         "잔여생산필요량": remain_need,
                         "진도율": progress_ratio,
@@ -4456,7 +4573,7 @@ def main():
                     process_rows.append(row)
 
                 progress_df = pd.DataFrame(process_rows)
-                process_cols = ["공정코드", "공정", "2026 생산누계", "이니셜수"] + [
+                process_cols = ["공정코드", "공정", "2026 생산누계", "수주수량", "이니셜수"] + [
                     f"{month} 생산" for month in month_list
                 ] + ["잔여생산필요량", "진도율"]
                 progress_df = progress_df[process_cols]
@@ -4505,10 +4622,11 @@ def main():
                     if process_detail.empty:
                         st.info(f"{sel_row['공정']} 대상 잔여 리스트가 없습니다.")
                     else:
+                        progress_col = need_col if need_col in process_detail.columns else "생산필요량"
                         process_detail["생산진도율"] = process_detail.apply(
-                            lambda row: (1 - (float(row.get("생산필요량", 0)) / float(row.get("수량", 0)))) * 100
-                            if float(row.get("수량", 0)) > 0
-                            else 0,
+                            lambda row: calc_progress_ratio_340(
+                                row.get(progress_col, 0), row.get("수량", 0)
+                            ),
                             axis=1,
                         )
                         detail_cols = [
@@ -4605,9 +4723,7 @@ def main():
                 + order_summary["포장유형"].astype(str).str.strip()
             )
             order_summary["진도율"] = order_summary.apply(
-                lambda row: (1 - (row["생산필요량"] / row["수량"])) * 100
-                if row["수량"] > 0
-                else 0,
+                lambda row: calc_progress_ratio_340(row["생산필요량"], row["수량"]),
                 axis=1,
             )
 
@@ -4811,9 +4927,9 @@ def main():
                     lambda x: parse_spec_from_code(x)[0]
                 )
                 popup_df["생산진도율"] = popup_df.apply(
-                    lambda row: (1 - (float(row.get("생산필요량", 0)) / float(row.get("수량", 0)))) * 100
-                    if float(row.get("수량", 0)) > 0
-                    else 0,
+                    lambda row: calc_progress_ratio_340(
+                        row.get("생산필요량", 0), row.get("수량", 0)
+                    ),
                     axis=1,
                 )
                 popup_cols = [
@@ -4937,9 +5053,9 @@ def main():
                             lambda x: parse_spec_from_code(x)[0]
                         )
                         sale_detail["생산진도율"] = sale_detail.apply(
-                            lambda row: (1 - (float(row.get("생산필요량", 0)) / float(row.get("수량", 0)))) * 100
-                            if float(row.get("수량", 0)) > 0
-                            else 0,
+                            lambda row: calc_progress_ratio_340(
+                                row.get("생산필요량", 0), row.get("수량", 0)
+                            ),
                             axis=1,
                         )
                         by_initial = sale_detail[
@@ -5126,12 +5242,14 @@ def main():
                     )
 
             st.markdown("### 상세 리스트")
-            detail_df = fifo_view.copy()
-            detail_df["파워"] = detail_df["품목코드"].apply(lambda x: parse_spec_from_code(x)[0])
-            detail_df["생산진도율"] = detail_df.apply(
-                lambda row: (1 - (float(row.get("생산필요량", 0)) / float(row.get("수량", 0)))) * 100
-                if float(row.get("수량", 0)) > 0
-                else 0,
+            detail_report_df = fifo_view.copy()
+            detail_report_df["파워"] = detail_report_df["품목코드"].apply(
+                lambda x: parse_spec_from_code(x)[0]
+            )
+            detail_report_df["생산진도율"] = detail_report_df.apply(
+                lambda row: calc_progress_ratio_340(
+                    row.get("생산필요량", 0), row.get("수량", 0)
+                ),
                 axis=1,
             )
             detail_cols = [
@@ -5156,11 +5274,12 @@ def main():
                     "완제품",
                     "불용재고",
                 ]
-                if col in detail_df.columns
+                if col in detail_report_df.columns
             ]
-            detail_df = detail_df[detail_cols].copy().sort_values(
+            detail_report_df = detail_report_df[detail_cols].copy().sort_values(
                 ["출고예상일", "수주번호"], ascending=True
             )
+            detail_df = detail_report_df.copy()
             detail_df["출고예상일"] = format_date_series(detail_df["출고예상일"])
             for col in [
                 "수량",
@@ -5197,6 +5316,75 @@ def main():
                 key="tab340x_detail",
                 download_name="o2o2d_ex_컬러5종_상세.xlsx",
             )
+
+            st.markdown("### 통합 보고서 출력")
+            report_ref_date = pd.to_datetime(
+                fifo_view.get("출고예상일", pd.Series(dtype="datetime64[ns]")),
+                errors="coerce",
+            ).max()
+            report_date_text = (
+                report_ref_date.strftime("%Y-%m-%d")
+                if pd.notna(report_ref_date)
+                else datetime.now().strftime("%Y-%m-%d")
+            )
+            report_summary = pd.DataFrame(
+                [
+                    {"항목": "총 수주수량", "값": float(total_order_qty)},
+                    {"항목": "총 포장배정", "값": float(total_pack_alloc)},
+                    {"항목": "전체 포장실적", "값": float(total_pack_raw)},
+                    {"항목": "완제품 포장가능", "값": float(total_pack_possible)},
+                    {"항목": "잔여 생산필요량", "값": float(total_need)},
+                    {"항목": "전체 진도율(%)", "값": float(overall_ratio)},
+                    {
+                        "항목": "대상 수주건수",
+                        "값": float(
+                            fifo_view.get("수주번호", pd.Series(dtype=str))
+                            .astype(str)
+                            .str.strip()
+                            .replace({"": pd.NA})
+                            .dropna()
+                            .nunique()
+                        ),
+                    },
+                    {
+                        "항목": "대상 규격수(품목코드)",
+                        "값": float(
+                            fifo_view.get("품목코드", pd.Series(dtype=str))
+                            .astype(str)
+                            .str.strip()
+                            .replace({"": pd.NA})
+                            .dropna()
+                            .nunique()
+                        ),
+                    },
+                ]
+            )
+            report_insights = build_color5_insights(progress_df, order_summary, pack_status)
+            for line in report_insights:
+                st.caption(f"- {line}")
+
+            report_bytes, report_error = build_color5_full_report(
+                "O2O2D EX 컬러5종 진행현황 통합보고서",
+                report_date_text,
+                report_summary,
+                report_insights,
+                progress_df,
+                order_summary,
+                pack_status,
+                year_df,
+                month_df,
+                detail_report_df,
+            )
+            if report_error:
+                st.warning(f"통합보고서 생성 실패: {report_error}")
+            else:
+                st.download_button(
+                    "컬러5종 통합보고서 다운로드",
+                    data=report_bytes.getvalue(),
+                    file_name=f"o2o2d_ex_컬러5종_통합보고서_{report_date_text}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="tab340x_full_report_download",
+                )
 
     with tab_micellia:
         st.subheader("미셀리아 진행현황")

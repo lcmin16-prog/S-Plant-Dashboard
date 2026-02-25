@@ -780,6 +780,96 @@ def load_packaging_summary():
 
 
 @st.cache_data(show_spinner=False)
+def load_daily_production_actuals():
+    files = sorted(Path(".").glob("일별업데이트_생산실적현황*.csv"))
+    cols = ["생산일자", "공정코드", "품목코드", "품명", "양품수량", "생산수량", "상태"]
+    if not files:
+        return pd.DataFrame(columns=cols)
+    frames = []
+    for path in files:
+        file_df = None
+        for enc in ("utf-8-sig", "cp949", "euc-kr"):
+            try:
+                file_df = pd.read_csv(
+                    path,
+                    encoding=enc,
+                    low_memory=False,
+                    usecols=lambda c: str(c).strip() in cols,
+                )
+                break
+            except Exception:
+                continue
+        if file_df is None or file_df.empty:
+            continue
+        file_df.columns = [str(c).strip() for c in file_df.columns]
+        for col in cols:
+            if col not in file_df.columns:
+                file_df[col] = ""
+        frames.append(file_df[cols])
+    if not frames:
+        return pd.DataFrame(columns=cols)
+
+    df = pd.concat(frames, ignore_index=True)
+    df["품목코드"] = df["품목코드"].astype(str).str.strip()
+    df["공정코드"] = df["공정코드"].apply(normalize_realtime_process_code)
+    df["양품수량"] = normalize_numeric(df["양품수량"])
+    df["생산수량"] = normalize_numeric(df["생산수량"])
+    df["상태"] = df["상태"].astype(str).str.strip()
+    df = df[df["상태"] != "저장"].copy()
+    df["생산일자"] = pd.to_datetime(df["생산일자"], errors="coerce")
+    df = df[df["품목코드"] != ""]
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_daily_packaging_actuals():
+    files = sorted(Path(".").glob("일별업데이트_포장실적*.csv"))
+    cols = [
+        "생산일자",
+        "판매코드",
+        "판매명",
+        "품목코드",
+        "제품명",
+        "실적수량",
+        "수주번호",
+        "이니셜",
+        "구분",
+    ]
+    if not files:
+        return pd.DataFrame(columns=cols)
+    frames = []
+    for path in files:
+        file_df = None
+        for enc in ("utf-8-sig", "cp949", "euc-kr"):
+            try:
+                file_df = pd.read_csv(
+                    path,
+                    encoding=enc,
+                    low_memory=False,
+                    usecols=lambda c: str(c).strip() in cols,
+                )
+                break
+            except Exception:
+                continue
+        if file_df is None or file_df.empty:
+            continue
+        file_df.columns = [str(c).strip() for c in file_df.columns]
+        for col in cols:
+            if col not in file_df.columns:
+                file_df[col] = ""
+        frames.append(file_df[cols])
+    if not frames:
+        return pd.DataFrame(columns=cols)
+
+    df = pd.concat(frames, ignore_index=True)
+    df["판매코드"] = df["판매코드"].astype(str).str.strip()
+    df["품목코드"] = df["품목코드"].astype(str).str.strip()
+    df["실적수량"] = normalize_numeric(df["실적수량"])
+    df["생산일자"] = pd.to_datetime(df["생산일자"], errors="coerce")
+    return df
+
+
+@st.cache_data(show_spinner=False)
 def load_product_name_summary():
     path = Path(PRODUCT_NAME_FILE)
     if not path.exists():
@@ -1646,6 +1736,7 @@ def main():
         tab_production,
         tab_inventory,
         tab_goal,
+        tab_340x,
         tab_micellia,
         tab_tiktok,
     ) = st.tabs(
@@ -1654,6 +1745,7 @@ def main():
             "생산계획",
             "재고현황",
             "S관 공장목표현황",
+            "O2O2D EX 컬러5종 진행현황",
             "미셀리아 진행현황",
             "틱톡글로벌 진행현황",
         ]
@@ -4048,6 +4140,1063 @@ def main():
             alloc_df.at[idx, "재계산_생산필요량"] = remaining
 
         return alloc_df
+
+    with tab_340x:
+        st.subheader("O2O2D EX 컬러5종 진행현황")
+        target_p_prefixes = ("P3405", "P3406", "P3407", "P3408", "P3409")
+        order_view = filtered_base[
+            filtered_base["품목코드"].astype(str).str.startswith(
+                target_p_prefixes, na=False
+            )
+        ].copy()
+
+        def fmt_int_340(value):
+            try:
+                return f"{int(round(float(value))):,}"
+            except Exception:
+                return "0"
+
+        def fmt_ratio_340(value):
+            try:
+                return f"{float(value):.2f}"
+            except Exception:
+                return "0.00"
+
+        def color_group_340(item_code, name_text=""):
+            name = str(name_text).lower()
+            if "blending rose" in name:
+                return "Blending Rose"
+            if "blending hazel" in name:
+                return "Blending Hazel"
+            if "sepia choco" in name:
+                return "Sepia Choco"
+            if "ash gray" in name:
+                return "Ash Gray"
+            if "ash brown" in name:
+                return "Ash Brown"
+            code = clean_text(item_code)
+            if code.startswith("P3409"):
+                return "Blending Rose"
+            if code.startswith("P3408"):
+                return "Blending Hazel"
+            if code.startswith("P3405"):
+                return "Sepia Choco"
+            if code.startswith("P3406"):
+                return "Ash Brown"
+            if code.startswith("P3407"):
+                return "Ash Gray"
+            return "기타"
+
+        def pack_group_340(name_text):
+            text = str(name_text).lower()
+            if "90p" in text:
+                return "프로모션"
+            return "일반"
+
+        def process_need_candidates():
+            return {
+                "[10]": ["사출필요량"],
+                "[20]": ["분리필요량"],
+                # Dashboard internally uses renamed short columns first.
+                "[45]": ["수화필요량", "하이드레이션/전면검사필요량", "수화/검사필요량"],
+                "[55]": ["접착필요량", "접착/멸균필요량", "멸균필요량"],
+                "[80]": ["누수/규격필요량", "누수/규격검사필요량", "누수필요량"],
+            }
+
+        def get_process_need_col(frame, process_code):
+            candidates = process_need_candidates().get(process_code, [])
+            existing = [col for col in candidates if col in frame.columns]
+            if len(existing) == 1:
+                return existing[0]
+            if len(existing) > 1:
+                # If duplicate semantic columns exist, prefer the one with actual values.
+                sums = {
+                    col: float(pd.to_numeric(frame[col], errors="coerce").fillna(0).abs().sum())
+                    for col in existing
+                }
+                return max(existing, key=lambda col: sums.get(col, 0.0))
+            # Fallback: substring match for column-name variants
+            col_texts = {str(c): str(c).replace(" ", "") for c in frame.columns}
+            if process_code == "[45]":
+                for src, norm in col_texts.items():
+                    if "전면검사" in norm and "필요량" in norm:
+                        return src
+            if process_code == "[55]":
+                for src, norm in col_texts.items():
+                    if ("접착" in norm or "멸균" in norm) and "필요량" in norm:
+                        return src
+            if process_code == "[80]":
+                for src, norm in col_texts.items():
+                    if "누수" in norm and "필요량" in norm:
+                        return src
+            return ""
+
+        def get_process_need_sum(frame, process_code):
+            col = get_process_need_col(frame, process_code)
+            if not col:
+                return 0.0
+            return float(pd.to_numeric(frame[col], errors="coerce").fillna(0).sum())
+
+        if order_view.empty:
+            st.info("P3405~P3409 대상 수주가 없습니다.")
+        else:
+            order_view["출고예상일"] = pd.to_datetime(
+                order_view["출고예상일"], errors="coerce"
+            )
+            order_view["수주일자"] = pd.to_datetime(order_view["수주일자"], errors="coerce")
+            number_cols = [
+                "수량",
+                "생산필요량",
+                "사출필요량",
+                "분리필요량",
+                "수화필요량",
+                "접착필요량",
+                "누수/규격필요량",
+                "사출창고",
+                "분리창고",
+                "검사접착",
+                "누수규격",
+                "완제품",
+                "불용재고",
+            ]
+            for col in number_cols:
+                if col in order_view.columns:
+                    order_view[col] = pd.to_numeric(
+                        order_view[col], errors="coerce"
+                    ).fillna(0)
+
+            order_view["품목구분"] = order_view.apply(
+                lambda row: color_group_340(row.get("품목코드", ""), row.get("품명", "")),
+                axis=1,
+            )
+            order_view["포장유형"] = order_view["품명"].apply(pack_group_340)
+
+            sale_set = set(order_view["판매코드"].astype(str).str.strip())
+            q_prefixes = tuple(
+                sorted(
+                    {
+                        clean_text(value)[:5]
+                        for value in order_view["Q코드"]
+                        if clean_text(value)
+                    }
+                )
+            )
+            r_prefixes = tuple(
+                sorted(
+                    {
+                        clean_text(value)[:5]
+                        for value in order_view["R코드"]
+                        if clean_text(value)
+                    }
+                )
+            )
+
+            pack_actuals = load_daily_packaging_actuals()
+            if pack_actuals.empty:
+                pack_view = pack_actuals
+            else:
+                sale_mask = pack_actuals["판매코드"].isin(sale_set)
+                code_mask = pack_actuals["품목코드"].astype(str).str.startswith(
+                    target_p_prefixes, na=False
+                )
+                pack_view = pack_actuals[sale_mask | code_mask].copy()
+            pack_by_sale = (
+                pack_view.groupby("판매코드", dropna=False)["실적수량"].sum().to_dict()
+                if not pack_view.empty
+                else {}
+            )
+
+            fifo_view = apply_fifo_allocation(order_view, pack_by_sale).copy()
+            fifo_view["포장수량"] = fifo_view["포장배정"].fillna(0)
+            fifo_view["포장가능수량"] = fifo_view["완제품배정"].fillna(0)
+            fifo_view["포장잔량"] = (
+                fifo_view["수량"] - fifo_view["포장수량"]
+            ).clip(lower=0)
+
+            total_order_qty = fifo_view["수량"].sum()
+            total_need = fifo_view["생산필요량"].sum()
+            remaining_specs = (
+                fifo_view.loc[fifo_view["생산필요량"] > 0, "판매코드"]
+                .astype(str)
+                .str.strip()
+                .nunique()
+            )
+            total_pack_alloc = fifo_view["포장수량"].sum()
+            total_pack_possible = fifo_view["포장가능수량"].sum()
+            total_pack_raw = pack_view["실적수량"].sum() if not pack_view.empty else 0
+            overall_ratio = (
+                (1 - (total_need / total_order_qty)) * 100 if total_order_qty > 0 else 0
+            )
+
+            kpi = st.columns(5)
+            kpi[0].metric("수주수량 합계", fmt_int_340(total_order_qty))
+            kpi[1].metric("포장배정 합계", fmt_int_340(total_pack_alloc))
+            kpi[2].metric("전체 포장실적", fmt_int_340(total_pack_raw))
+            kpi[3].metric("포장가능수량(완제품)", fmt_int_340(total_pack_possible))
+            kpi[4].metric("잔여생산필요량", fmt_int_340(total_need))
+            st.caption(
+                f"남은 규격 {fmt_int_340(remaining_specs)} · 진도율 {fmt_ratio_340(overall_ratio)}%"
+            )
+
+            st.markdown("### 공정별 진행상황 (2026)")
+            process_map = [
+                ("[10]", "사출조립"),
+                ("[20]", "분리"),
+                ("[45]", "수화/검사"),
+                ("[55]", "접착/멸균"),
+                ("[80]", "누수/규격검사"),
+            ]
+            process_color_filter = st.radio(
+                "공정별 대상 컬러",
+                [
+                    "종합",
+                    "Sepia Choco",
+                    "Ash Gray",
+                    "Ash Brown",
+                    "Blending Rose",
+                    "Blending Hazel",
+                ],
+                horizontal=True,
+                key="tab340x_process_color_filter",
+            )
+
+            prod_actuals = load_daily_production_actuals()
+            if prod_actuals.empty:
+                prod_view = prod_actuals
+            else:
+                code_mask = prod_actuals["품목코드"].astype(str).str.startswith(
+                    target_p_prefixes, na=False
+                )
+                if q_prefixes:
+                    code_mask = code_mask | prod_actuals["품목코드"].astype(str).str.startswith(
+                        q_prefixes, na=False
+                    )
+                if r_prefixes:
+                    code_mask = code_mask | prod_actuals["품목코드"].astype(str).str.startswith(
+                        r_prefixes, na=False
+                    )
+                prod_view = prod_actuals[
+                    code_mask
+                    & prod_actuals["공정코드"].isin(["[10]", "[20]", "[45]", "[55]", "[80]"])
+                ].copy()
+                prod_view["품목구분"] = prod_view.apply(
+                    lambda row: color_group_340(
+                        row.get("품목코드", ""), row.get("품명", "")
+                    ),
+                    axis=1,
+                )
+            if prod_view.empty:
+                prod_view_2026 = prod_view
+                st.info("2026년 생산실적 데이터가 없습니다.")
+            else:
+                prod_view_2026 = prod_view[prod_view["생산일자"].dt.year == 2026].copy()
+                if process_color_filter != "종합":
+                    prod_view_2026 = prod_view_2026[
+                        prod_view_2026["품목구분"] == process_color_filter
+                    ].copy()
+
+            fifo_for_process = fifo_view.copy()
+            if process_color_filter != "종합":
+                fifo_for_process = fifo_for_process[
+                    fifo_for_process["품목구분"] == process_color_filter
+                ].copy()
+
+            if not prod_view_2026.empty:
+                prod_view_2026["월"] = prod_view_2026["생산일자"].dt.strftime("%Y-%m")
+                month_list = sorted(prod_view_2026["월"].dropna().unique().tolist())
+                monthly_process = (
+                    prod_view_2026.groupby(["공정코드", "월"], dropna=False)["양품수량"]
+                    .sum()
+                    .unstack(fill_value=0)
+                )
+                process_rows = []
+                for process_code, process_name in process_map:
+                    done_total = float(
+                        monthly_process.loc[process_code].sum()
+                        if process_code in monthly_process.index
+                        else 0
+                    )
+                    need_col = get_process_need_col(fifo_for_process, process_code)
+                    remain_need = get_process_need_sum(fifo_for_process, process_code)
+                    if need_col and need_col in fifo_for_process.columns:
+                        initials_count = (
+                            fifo_for_process.loc[
+                                pd.to_numeric(
+                                    fifo_for_process[need_col], errors="coerce"
+                                ).fillna(0)
+                                > 0,
+                                "이니셜",
+                            ]
+                            .astype(str)
+                            .str.strip()
+                            .nunique()
+                        )
+                    else:
+                        initials_count = 0
+                    progress_ratio = (
+                        (done_total / (done_total + remain_need)) * 100
+                        if (done_total + remain_need) > 0
+                        else 0
+                    )
+                    row = {
+                        "공정코드": process_code,
+                        "공정": process_name,
+                        "2026 생산누계": done_total,
+                        "이니셜수": initials_count,
+                        "잔여생산필요량": remain_need,
+                        "진도율": progress_ratio,
+                    }
+                    for month in month_list:
+                        row[f"{month} 생산"] = float(
+                            monthly_process.at[process_code, month]
+                            if process_code in monthly_process.index
+                            and month in monthly_process.columns
+                            else 0
+                        )
+                    process_rows.append(row)
+
+                progress_df = pd.DataFrame(process_rows)
+                process_cols = ["공정코드", "공정", "2026 생산누계", "이니셜수"] + [
+                    f"{month} 생산" for month in month_list
+                ] + ["잔여생산필요량", "진도율"]
+                progress_df = progress_df[process_cols]
+                progress_show = progress_df.copy()
+                for col in progress_show.columns:
+                    if col not in {"공정", "진도율"}:
+                        progress_show[col] = progress_show[col].apply(fmt_int_340)
+                progress_show["진도율"] = progress_show["진도율"].apply(
+                    lambda v: f"{fmt_ratio_340(v)}%"
+                )
+                progress_show = progress_show.drop(columns=["공정코드"])
+                progress_styled = apply_alignment(progress_show.style, progress_show)
+                process_selection = render_dataframe(
+                    progress_styled,
+                    progress_show,
+                    width="stretch",
+                    height=calc_table_height(len(progress_show), max_height=300),
+                    key="tab340x_process",
+                    download_name="o2o2d_ex_컬러5종_공정진행.xlsx",
+                    on_select="rerun",
+                    selection_mode="single-row",
+                )
+
+                if (
+                    process_selection
+                    and process_selection.selection.rows
+                    and len(process_selection.selection.rows) > 0
+                ):
+                    sel_idx = process_selection.selection.rows[0]
+                    sel_row = progress_df.iloc[sel_idx]
+                    sel_process_code = str(sel_row["공정코드"])
+                    need_col = get_process_need_col(fifo_for_process, sel_process_code)
+                    process_detail = fifo_for_process.copy()
+                    process_detail["파워"] = process_detail["품목코드"].apply(
+                        lambda x: parse_spec_from_code(x)[0]
+                    )
+                    if need_col in process_detail.columns:
+                        process_detail = process_detail[
+                            pd.to_numeric(
+                                process_detail[need_col], errors="coerce"
+                            ).fillna(0)
+                            > 0
+                        ].copy()
+                    else:
+                        process_detail = process_detail.iloc[0:0].copy()
+                    if process_detail.empty:
+                        st.info(f"{sel_row['공정']} 대상 잔여 리스트가 없습니다.")
+                    else:
+                        process_detail["생산진도율"] = process_detail.apply(
+                            lambda row: (1 - (float(row.get("생산필요량", 0)) / float(row.get("수량", 0)))) * 100
+                            if float(row.get("수량", 0)) > 0
+                            else 0,
+                            axis=1,
+                        )
+                        detail_cols = [
+                            c
+                            for c in [
+                                "품목구분",
+                                "품명",
+                                "파워",
+                                "수주번호",
+                                "수량",
+                                "생산필요량",
+                                "생산진도율",
+                                need_col,
+                            ]
+                            if c in process_detail.columns
+                        ]
+                        detail_view = process_detail[detail_cols].copy()
+                        detail_view = detail_view.sort_values(
+                            by=["품명", "파워"], ascending=[True, True], na_position="last"
+                        )
+                        if "생산필요량" in detail_view.columns and "생산진도율" in detail_view.columns:
+                            cols = list(detail_view.columns)
+                            if cols.index("생산진도율") < cols.index("생산필요량"):
+                                cols.remove("생산진도율")
+                                idx = cols.index("생산필요량")
+                                cols.insert(idx + 1, "생산진도율")
+                                detail_view = detail_view[cols]
+                        if need_col in detail_view.columns:
+                            detail_view = detail_view.rename(
+                                columns={need_col: "잔여필요량"}
+                            )
+                        for c in ["수량", "생산필요량", "잔여필요량"]:
+                            if c in detail_view.columns:
+                                detail_view[c] = detail_view[c].apply(fmt_int_340)
+                        if "생산진도율" in detail_view.columns:
+                            detail_view["생산진도율"] = detail_view["생산진도율"].apply(
+                                lambda v: f"{fmt_ratio_340(v)}%"
+                            )
+                        st.markdown(f"#### {sel_row['공정']} 상세 (컬러/파워)")
+                        detail_styled = apply_alignment(detail_view.style, detail_view)
+                        render_dataframe(
+                            detail_styled,
+                            detail_view,
+                            width="stretch",
+                            height=calc_table_height(len(detail_view), max_height=320),
+                            key="tab340x_process_detail",
+                        )
+
+            st.markdown("### 수주별 요약")
+            summary_source = fifo_view.copy()
+            order_process_meta = [
+                ("사출필요량", "[10]", "사출조립"),
+                ("분리필요량", "[20]", "분리"),
+                ("수화필요량", "[45]", "수화/검사"),
+                ("접착필요량", "[55]", "접착/멸균"),
+                ("누수/규격필요량", "[80]", "누수/규격검사"),
+            ]
+            for need_col, _, _ in order_process_meta:
+                if need_col not in summary_source.columns:
+                    summary_source[need_col] = 0
+            summary_source["이니셜"] = summary_source["이니셜"].astype(str).str.strip()
+            summary_source["이니셜"] = summary_source["이니셜"].replace(
+                {"": pd.NA, "nan": pd.NA, "None": pd.NA}
+            )
+            if "수출/국내" in summary_source.columns:
+                fallback_initial = summary_source["수출/국내"].astype(str).str.strip()
+            elif "수출국가" in summary_source.columns:
+                fallback_initial = summary_source["수출국가"].astype(str).str.strip()
+            else:
+                fallback_initial = pd.Series([""] * len(summary_source), index=summary_source.index)
+            summary_source["이니셜"] = (
+                summary_source["이니셜"].fillna(fallback_initial).replace({"": "-"})
+            )
+
+            order_summary = (
+                summary_source.groupby(["이니셜", "포장유형"], dropna=False)[
+                    ["수량", "포장수량", "포장잔량", "생산필요량"]
+                    + [c for c, _, _ in order_process_meta]
+                ]
+                .sum()
+                .reset_index()
+            )
+            order_meta = (
+                summary_source.groupby(["이니셜", "포장유형"], dropna=False)
+                .agg(납기일=("출고예상일", "min"))
+                .reset_index()
+            )
+            order_summary = order_summary.merge(
+                order_meta, on=["이니셜", "포장유형"], how="left"
+            )
+            order_summary["__summary_key"] = (
+                order_summary["이니셜"].astype(str).str.strip()
+                + "|"
+                + order_summary["포장유형"].astype(str).str.strip()
+            )
+            order_summary["진도율"] = order_summary.apply(
+                lambda row: (1 - (row["생산필요량"] / row["수량"])) * 100
+                if row["수량"] > 0
+                else 0,
+                axis=1,
+            )
+
+            if not prod_view_2026.empty:
+                pace_source = prod_view_2026[
+                    prod_view_2026["품목코드"]
+                    .astype(str)
+                    .str.startswith(target_p_prefixes, na=False)
+                ].copy()
+                if not pace_source.empty:
+                    pace = (
+                        pace_source.groupby("품목코드", dropna=False)
+                        .agg(
+                            생산합계=("양품수량", "sum"),
+                            가동일수=("생산일자", lambda s: s.dt.date.nunique()),
+                            기준일=("생산일자", "max"),
+                        )
+                        .reset_index()
+                    )
+                    pace["일평균생산"] = pace.apply(
+                        lambda row: row["생산합계"] / row["가동일수"]
+                        if row["가동일수"] > 0
+                        else 0,
+                        axis=1,
+                    )
+                    avg_map = dict(
+                        zip(pace["품목코드"].astype(str), pace["일평균생산"])
+                    )
+                    date_map = dict(zip(pace["품목코드"].astype(str), pace["기준일"]))
+                    global_avg = (
+                        float(pace_source["양품수량"].sum())
+                        / max(pace_source["생산일자"].dt.date.nunique(), 1)
+                    )
+                else:
+                    avg_map = {}
+                    date_map = {}
+                    global_avg = 0.0
+                    proc_avg_map = {}
+                    proc_base_date = pd.NaT
+            else:
+                avg_map = {}
+                date_map = {}
+                global_avg = 0.0
+                proc_avg_map = {}
+                proc_base_date = pd.NaT
+
+            if not prod_view_2026.empty:
+                proc_pace = (
+                    prod_view_2026.groupby("공정코드", dropna=False)
+                    .agg(
+                        생산합계=("양품수량", "sum"),
+                        가동일수=("생산일자", lambda s: s.dt.date.nunique()),
+                        기준일=("생산일자", "max"),
+                    )
+                    .reset_index()
+                )
+                proc_pace["일평균생산"] = proc_pace.apply(
+                    lambda row: row["생산합계"] / row["가동일수"]
+                    if row["가동일수"] > 0
+                    else 0,
+                    axis=1,
+                )
+                proc_avg_map = dict(
+                    zip(proc_pace["공정코드"].astype(str), proc_pace["일평균생산"])
+                )
+                proc_base_date = proc_pace["기준일"].max()
+
+            order_code_daily = (
+                summary_source.groupby(["이니셜", "포장유형"], dropna=False)["품목코드"]
+                .apply(
+                    lambda s: sum(
+                        avg_map.get(str(code).strip(), 0)
+                        for code in sorted({str(x).strip() for x in s if str(x).strip()})
+                    )
+                )
+                .rename("일평균생산")
+                .reset_index()
+            )
+            order_code_date = (
+                summary_source.groupby(["이니셜", "포장유형"], dropna=False)["품목코드"]
+                .apply(
+                    lambda s: max(
+                        [
+                            date_map.get(str(code).strip(), pd.NaT)
+                            for code in sorted({str(x).strip() for x in s if str(x).strip()})
+                            if pd.notna(date_map.get(str(code).strip(), pd.NaT))
+                        ],
+                        default=pd.NaT,
+                    )
+                )
+                .rename("기준일")
+                .reset_index()
+            )
+            order_summary = order_summary.merge(
+                order_code_daily, on=["이니셜", "포장유형"], how="left"
+            )
+            order_summary = order_summary.merge(
+                order_code_date, on=["이니셜", "포장유형"], how="left"
+            )
+            order_summary["일평균생산"] = order_summary["일평균생산"].fillna(0)
+            if global_avg > 0:
+                order_summary["일평균생산"] = order_summary["일평균생산"].where(
+                    order_summary["일평균생산"] > 0,
+                    global_avg,
+                )
+
+            def calc_process_schedule(row):
+                base_date = row["기준일"] if pd.notna(row["기준일"]) else proc_base_date
+                if pd.isna(base_date):
+                    return pd.Series(
+                        {"공정명": "-", "공정별예상일정": "-", "최종완료일자": "-"}
+                    )
+                current_date = pd.to_datetime(base_date)
+                process_names = []
+                schedule_parts = []
+                has_need = False
+                for need_col, process_code, process_name in order_process_meta:
+                    need_qty = float(row.get(need_col, 0) or 0)
+                    if need_qty <= 0:
+                        schedule_parts.append(f"{process_name}:-")
+                        continue
+                    has_need = True
+                    process_names.append(process_name)
+                    avg_qty = float(proc_avg_map.get(process_code, 0) or 0)
+                    if avg_qty <= 0:
+                        schedule_parts.append(f"{process_name}:계산불가")
+                        continue
+                    days_needed = max(1, int(math.ceil(need_qty / avg_qty)))
+                    current_date = current_date + pd.to_timedelta(days_needed, unit="D")
+                    schedule_parts.append(
+                        f"{process_name}:{current_date.strftime('%Y-%m-%d')}"
+                    )
+                final_date = current_date.strftime("%Y-%m-%d") if has_need else "-"
+                process_line = "→".join(process_names) if process_names else "-"
+                return pd.Series(
+                    {
+                        "공정명": process_line,
+                        "공정별예상일정": " | ".join(schedule_parts),
+                        "최종완료일자": final_date,
+                    }
+                )
+
+            order_summary = pd.concat(
+                [order_summary, order_summary.apply(calc_process_schedule, axis=1)],
+                axis=1,
+            )
+            order_show = order_summary.copy()
+            order_show["납기일"] = format_date_series(order_show["납기일"])
+            for col in ["수량", "포장수량", "포장잔량", "생산필요량", "일평균생산"]:
+                order_show[col] = order_show[col].apply(fmt_int_340)
+            order_show["진도율"] = order_show["진도율"].apply(
+                lambda v: f"{fmt_ratio_340(v)}%"
+            )
+            order_show = order_show.rename(
+                columns={
+                    "포장유형": "유형",
+                    "수량": "수주수량",
+                }
+            )
+            order_show = order_show[
+                [
+                    "이니셜",
+                    "납기일",
+                    "유형",
+                    "수주수량",
+                    "포장수량",
+                    "포장잔량",
+                    "생산필요량",
+                    "진도율",
+                    "일평균생산",
+                    "공정명",
+                    "공정별예상일정",
+                    "최종완료일자",
+                ]
+            ].sort_values(["이니셜", "유형"])
+            order_styled = apply_alignment(order_show.style, order_show)
+            order_selection = render_dataframe(
+                order_styled,
+                order_show,
+                width="stretch",
+                height=calc_table_height(len(order_show), max_height=360),
+                key="tab340x_order_summary",
+                download_name="o2o2d_ex_컬러5종_수주요약.xlsx",
+                on_select="rerun",
+                selection_mode="single-row",
+            )
+
+            if (
+                order_selection
+                and order_selection.selection.rows
+                and len(order_selection.selection.rows) > 0
+            ):
+                sel_idx = order_selection.selection.rows[0]
+                sel_initial = str(order_summary.iloc[sel_idx]["이니셜"]).strip()
+                sel_type = str(order_summary.iloc[sel_idx]["포장유형"]).strip()
+                popup_df = summary_source[
+                    (summary_source["이니셜"].astype(str).str.strip() == sel_initial)
+                    & (summary_source["포장유형"].astype(str).str.strip() == sel_type)
+                ].copy()
+                popup_df["파워"] = popup_df["품목코드"].apply(
+                    lambda x: parse_spec_from_code(x)[0]
+                )
+                popup_df["생산진도율"] = popup_df.apply(
+                    lambda row: (1 - (float(row.get("생산필요량", 0)) / float(row.get("수량", 0)))) * 100
+                    if float(row.get("수량", 0)) > 0
+                    else 0,
+                    axis=1,
+                )
+                popup_cols = [
+                    c
+                    for c in [
+                        "품목구분",
+                        "품명",
+                        "파워",
+                        "수량",
+                        "포장수량",
+                        "포장잔량",
+                        "생산필요량",
+                        "생산진도율",
+                    ]
+                    if c in popup_df.columns
+                ]
+                popup_view = popup_df[popup_cols].copy()
+                popup_view = popup_view.sort_values(
+                    by=["품명", "파워"], ascending=[True, True], na_position="last"
+                )
+                for c in ["수량", "포장수량", "포장잔량", "생산필요량"]:
+                    if c in popup_view.columns:
+                        popup_view[c] = popup_view[c].apply(fmt_int_340)
+                if "생산진도율" in popup_view.columns:
+                    popup_view["생산진도율"] = popup_view["생산진도율"].apply(
+                        lambda v: f"{fmt_ratio_340(v)}%"
+                    )
+                st.markdown(f"#### 이니셜 {sel_initial} · 유형 {sel_type} 상세 (컬러/파워)")
+                popup_styled = apply_alignment(popup_view.style, popup_view)
+                render_dataframe(
+                    popup_styled,
+                    popup_view,
+                    width="stretch",
+                    height=calc_table_height(len(popup_view), max_height=300),
+                    key="tab340x_order_detail",
+                )
+
+            st.markdown("### 포장 진행현황")
+            if pack_view.empty:
+                st.info("포장실적 데이터가 없습니다.")
+            else:
+                order_meta = (
+                    fifo_view.groupby("판매코드", dropna=False)
+                    .agg(요청수량=("수량", "sum"), 주문품명=("품명", representative_name))
+                    .reset_index()
+                )
+                pack_meta = (
+                    pack_view.groupby("판매코드", dropna=False)
+                    .agg(
+                        판매명=("판매명", representative_name),
+                        포장수량=("실적수량", "sum"),
+                        포장이니셜=("이니셜", join_unique),
+                    )
+                    .reset_index()
+                )
+                pack_status = order_meta.merge(pack_meta, on="판매코드", how="outer").fillna("")
+                pack_status["요청수량"] = pd.to_numeric(
+                    pack_status["요청수량"], errors="coerce"
+                ).fillna(0)
+                pack_status["포장수량"] = pd.to_numeric(
+                    pack_status["포장수량"], errors="coerce"
+                ).fillna(0)
+                pack_status["연관포장수량"] = pack_status.apply(
+                    lambda row: min(row["요청수량"], row["포장수량"]), axis=1
+                )
+                pack_status["초과포장수량"] = (
+                    pack_status["포장수량"] - pack_status["요청수량"]
+                ).clip(lower=0)
+                pack_status["포장잔량"] = (
+                    pack_status["요청수량"] - pack_status["연관포장수량"]
+                ).clip(lower=0)
+                pack_status["판매명"] = pack_status["판매명"].where(
+                    pack_status["판매명"].astype(str).str.strip() != "",
+                    pack_status["주문품명"],
+                )
+                pack_status["파워"] = pack_status["판매코드"].apply(
+                    lambda x: parse_spec_from_code(x)[0]
+                )
+                pack_status = pack_status.sort_values(["판매코드", "파워"])
+                pack_show = pack_status[
+                    [
+                        "판매코드",
+                        "판매명",
+                        "파워",
+                        "요청수량",
+                        "포장수량",
+                        "연관포장수량",
+                        "초과포장수량",
+                        "포장잔량",
+                        "포장이니셜",
+                    ]
+                ].copy()
+                for col in ["요청수량", "포장수량", "연관포장수량", "초과포장수량", "포장잔량"]:
+                    pack_show[col] = pack_show[col].apply(fmt_int_340)
+                pack_styled = apply_alignment(pack_show.style, pack_show)
+                pack_selection = render_dataframe(
+                    pack_styled,
+                    pack_show,
+                    width="stretch",
+                    height=calc_table_height(len(pack_show), max_height=340),
+                    key="tab340x_pack_status",
+                    download_name="o2o2d_ex_컬러5종_포장현황.xlsx",
+                    on_select="rerun",
+                    selection_mode="single-row",
+                )
+
+                if (
+                    pack_selection
+                    and pack_selection.selection.rows
+                    and len(pack_selection.selection.rows) > 0
+                ):
+                    sel_idx = pack_selection.selection.rows[0]
+                    sel_sale = str(pack_status.iloc[sel_idx]["판매코드"])
+                    sale_detail = fifo_view[
+                        fifo_view["판매코드"].astype(str) == sel_sale
+                    ].copy()
+                    if sale_detail.empty:
+                        st.info(f"{sel_sale} 관련 수주가 없습니다.")
+                    else:
+                        sale_detail["파워"] = sale_detail["품목코드"].apply(
+                            lambda x: parse_spec_from_code(x)[0]
+                        )
+                        sale_detail["생산진도율"] = sale_detail.apply(
+                            lambda row: (1 - (float(row.get("생산필요량", 0)) / float(row.get("수량", 0)))) * 100
+                            if float(row.get("수량", 0)) > 0
+                            else 0,
+                            axis=1,
+                        )
+                        by_initial = sale_detail[
+                            [
+                                "이니셜",
+                                "품명",
+                                "파워",
+                                "포장잔량",
+                                "생산필요량",
+                                "생산진도율",
+                                "완제품",
+                                "사출창고",
+                                "분리창고",
+                                "검사접착",
+                                "누수규격",
+                            ]
+                        ].copy()
+                        by_initial = by_initial.sort_values(
+                            by=["품명", "파워"], ascending=[True, True], na_position="last"
+                        )
+                        for c in [
+                            "포장잔량",
+                            "생산필요량",
+                            "완제품",
+                            "사출창고",
+                            "분리창고",
+                            "검사접착",
+                            "누수규격",
+                        ]:
+                            if c in by_initial.columns:
+                                by_initial[c] = by_initial[c].apply(fmt_int_340)
+                        if "생산진도율" in by_initial.columns:
+                            by_initial["생산진도율"] = by_initial["생산진도율"].apply(
+                                lambda v: f"{fmt_ratio_340(v)}%"
+                            )
+                        st.markdown(f"#### {sel_sale} 이니셜별 포장잔량/현재고 상세")
+                        by_initial_styled = apply_alignment(by_initial.style, by_initial)
+                        render_dataframe(
+                            by_initial_styled,
+                            by_initial,
+                            width="stretch",
+                            height=calc_table_height(len(by_initial), max_height=300),
+                            key="tab340x_pack_detail",
+                        )
+
+            st.markdown("### 전체 생산현황")
+            if prod_actuals.empty:
+                st.info("생산실적 데이터가 없습니다.")
+            else:
+                code_mask = prod_actuals["품목코드"].astype(str).str.startswith(
+                    target_p_prefixes, na=False
+                )
+                if q_prefixes:
+                    code_mask = code_mask | prod_actuals["품목코드"].astype(str).str.startswith(
+                        q_prefixes, na=False
+                    )
+                if r_prefixes:
+                    code_mask = code_mask | prod_actuals["품목코드"].astype(str).str.startswith(
+                        r_prefixes, na=False
+                    )
+                prod_view = prod_actuals[
+                    code_mask
+                    & prod_actuals["공정코드"].isin(["[10]", "[20]", "[45]", "[55]", "[80]"])
+                ].copy()
+                if prod_view.empty:
+                    st.info("대상 코드의 생산실적이 없습니다.")
+                else:
+                    prod_view = prod_view.copy()
+                    prod_view["연도"] = prod_view["생산일자"].dt.year.astype("Int64")
+                    prod_view["월"] = prod_view["생산일자"].dt.strftime("%Y-%m")
+                    prod_view["품목구분"] = prod_view.apply(
+                        lambda row: color_group_340(
+                            row.get("품목코드", ""), row.get("품명", "")
+                        ),
+                        axis=1,
+                    )
+                    prod_view["공정"] = prod_view["공정코드"].map(
+                        {
+                            "[10]": "사출조립",
+                            "[20]": "분리",
+                            "[45]": "수화/검사",
+                            "[55]": "접착/멸균",
+                            "[80]": "누수/규격검사",
+                        }
+                    ).fillna(prod_view["공정코드"])
+
+                    item_options = [
+                        "종합",
+                        "Sepia Choco",
+                        "Ash Gray",
+                        "Ash Brown",
+                        "Blending Rose",
+                        "Blending Hazel",
+                    ]
+                    selected_item = st.radio(
+                        "품목 선택",
+                        item_options,
+                        horizontal=True,
+                        key="tab340x_prod_item_filter",
+                    )
+                    year_candidates = sorted(
+                        [
+                            int(y)
+                            for y in prod_view["연도"].dropna().unique().tolist()
+                            if str(y).isdigit()
+                        ]
+                    )
+                    month_year_options = ["전체"] + [str(y) for y in year_candidates]
+                    selected_month_year = st.radio(
+                        "월별 연도 선택",
+                        month_year_options,
+                        horizontal=True,
+                        key="tab340x_prod_month_year_filter",
+                    )
+
+                    prod_filtered = prod_view.copy()
+                    if selected_item != "종합":
+                        prod_filtered = prod_filtered[
+                            prod_filtered["품목구분"] == selected_item
+                        ].copy()
+
+                    st.markdown("#### 연도별 생산현황")
+                    year_df = (
+                        prod_filtered.groupby(["연도", "공정"], dropna=False)[["양품수량", "생산수량"]]
+                        .sum()
+                        .reset_index()
+                        .sort_values(["연도", "공정"])
+                    )
+                    year_df["수율"] = year_df.apply(
+                        lambda row: (row["양품수량"] / row["생산수량"] * 100)
+                        if row["생산수량"] > 0
+                        else 0,
+                        axis=1,
+                    )
+                    year_show = year_df.copy()
+                    year_show["연도"] = year_show["연도"].astype(str).replace("<NA>", "")
+                    year_show["양품수량"] = year_show["양품수량"].apply(fmt_int_340)
+                    year_show["생산수량"] = year_show["생산수량"].apply(fmt_int_340)
+                    year_show["수율"] = year_show["수율"].apply(
+                        lambda v: f"{fmt_ratio_340(v)}%"
+                    )
+                    year_styled = apply_alignment(year_show.style, year_show)
+                    render_dataframe(
+                        year_styled,
+                        year_show,
+                        width="stretch",
+                        height=calc_table_height(len(year_show), max_height=260),
+                        key="tab340x_prod_year",
+                        download_name="o2o2d_ex_컬러5종_연도별생산.xlsx",
+                    )
+
+                    st.markdown("#### 월별 생산현황")
+                    month_source = prod_filtered.copy()
+                    if selected_month_year != "전체":
+                        month_source = month_source[
+                            month_source["연도"].astype(str) == selected_month_year
+                        ].copy()
+                    month_df = (
+                        month_source.groupby(["월", "공정"], dropna=False)[["양품수량", "생산수량"]]
+                        .sum()
+                        .reset_index()
+                        .sort_values(["월", "공정"])
+                    )
+                    month_df["수율"] = month_df.apply(
+                        lambda row: (row["양품수량"] / row["생산수량"] * 100)
+                        if row["생산수량"] > 0
+                        else 0,
+                        axis=1,
+                    )
+                    month_show = month_df.copy()
+                    month_show["양품수량"] = month_show["양품수량"].apply(fmt_int_340)
+                    month_show["생산수량"] = month_show["생산수량"].apply(fmt_int_340)
+                    month_show["수율"] = month_show["수율"].apply(
+                        lambda v: f"{fmt_ratio_340(v)}%"
+                    )
+                    month_styled = apply_alignment(month_show.style, month_show)
+                    render_dataframe(
+                        month_styled,
+                        month_show,
+                        width="stretch",
+                        height=calc_table_height(len(month_show), max_height=320),
+                        key="tab340x_prod_month",
+                        download_name="o2o2d_ex_컬러5종_월별생산.xlsx",
+                    )
+
+            st.markdown("### 상세 리스트")
+            detail_df = fifo_view.copy()
+            detail_df["파워"] = detail_df["품목코드"].apply(lambda x: parse_spec_from_code(x)[0])
+            detail_df["생산진도율"] = detail_df.apply(
+                lambda row: (1 - (float(row.get("생산필요량", 0)) / float(row.get("수량", 0)))) * 100
+                if float(row.get("수량", 0)) > 0
+                else 0,
+                axis=1,
+            )
+            detail_cols = [
+                col
+                for col in [
+                    "출고예상일",
+                    "수주번호",
+                    "이니셜",
+                    "수출국가",
+                    "품명",
+                    "생산품명",
+                    "파워",
+                    "수량",
+                    "포장수량",
+                    "포장잔량",
+                    "생산필요량",
+                    "생산진도율",
+                    "사출창고",
+                    "분리창고",
+                    "검사접착",
+                    "누수규격",
+                    "완제품",
+                    "불용재고",
+                ]
+                if col in detail_df.columns
+            ]
+            detail_df = detail_df[detail_cols].copy().sort_values(
+                ["출고예상일", "수주번호"], ascending=True
+            )
+            detail_df["출고예상일"] = format_date_series(detail_df["출고예상일"])
+            for col in [
+                "수량",
+                "포장수량",
+                "포장잔량",
+                "생산필요량",
+                "사출창고",
+                "분리창고",
+                "검사접착",
+                "누수규격",
+                "완제품",
+                "불용재고",
+            ]:
+                if col in detail_df.columns:
+                    detail_df[col] = detail_df[col].apply(fmt_int_340)
+            if "생산진도율" in detail_df.columns:
+                detail_df["생산진도율"] = detail_df["생산진도율"].apply(
+                    lambda v: f"{fmt_ratio_340(v)}%"
+                )
+            def highlight_need_340(data):
+                styles = pd.DataFrame("", index=data.index, columns=data.columns)
+                if "생산필요량" in data.columns:
+                    styles.loc[:, "생산필요량"] = "color: #D0021B; font-weight: 700;"
+                return styles
+            detail_styled = apply_alignment(
+                detail_df.style.apply(highlight_need_340, axis=None),
+                detail_df,
+            )
+            render_dataframe(
+                detail_styled,
+                detail_df,
+                width="stretch",
+                height=calc_table_height(len(detail_df), max_height=420),
+                key="tab340x_detail",
+                download_name="o2o2d_ex_컬러5종_상세.xlsx",
+            )
 
     with tab_micellia:
         st.subheader("미셀리아 진행현황")
